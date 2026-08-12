@@ -8,19 +8,19 @@
 #
 # @param string _name name of the switch
 #
-switch::manual::init(){
+switch_manual_init(){
     local _name="$1"
     local _bridge="$2"
 
     if [ -z "${_bridge}" ]; then
-        config::core::get "_bridge" "bridge_${_name}"
+        config_core_get "_bridge" "bridge_${_name}"
         [ -z "${_bridge}" ] && return 1
     fi
 
     # Linux: bring existing bridge up.
     ip link set "${_bridge}" up >/dev/null 2>&1 || return 1
 
-    switch::set_viid "${_name}" "${_bridge}"
+    switch_set_viid "${_name}" "${_bridge}"
 }
 
 # show the configuration details for a manual switch
@@ -28,48 +28,48 @@ switch::manual::init(){
 # @param string _name the switch name
 # @param string _format output format
 #
-switch::manual::show(){
+switch_manual_show(){
     local _name="$1"
     local _format="$2"
     local _bridge _priv
 
-    config::core::get "_bridge" "bridge_${_name}"
-    config::core::get "_priv" "private_${_name}" "no"
+    config_core_get "_bridge" "bridge_${_name}"
+    config_core_get "_priv" "private_${_name}" "no"
     printf "${_format}" "${_name}" "manual" "${_bridge}" "n/a" "${_priv}" "n/a" "n/a" "n/a"
 }
 
 # create a manual switch
 # we just assign our switch name to the existing bridge
 #
-switch::manual::create(){
+switch_manual_create(){
 
     # we need to have a bridge
-    [ -z "${_bridge}" ] && util::err "you must specify a bridge to import when creating a manual switch"
+    [ -z "${_bridge}" ] && util_err "you must specify a bridge to import when creating a manual switch"
 
     # check we can find this bridge on the system
     ip link show "${_bridge}" >/dev/null 2>&1
-    [ $? -eq 0 ] || util::err "${_bridge} does not appear to be a valid existing bridge"
+    [ $? -eq 0 ] || util_err "${_bridge} does not appear to be a valid existing bridge"
 
     # store configuration
-    config::core::set "switch_list" "${_switch}" "1"
-    config::core::set "type_${_switch}" "manual"
-    config::core::set "bridge_${_switch}" "${_bridge}"
+    config_core_set "switch_list" "${_switch}" "1"
+    config_core_set "type_${_switch}" "manual"
+    config_core_set "bridge_${_switch}" "${_bridge}"
 
-    [ -n "${_priv}" ] && config::core::set "private_${_switch}" "${_priv}"
+    [ -n "${_priv}" ] && config_core_set "private_${_switch}" "${_priv}"
 
     # import
-    switch::manual::init "${_switch}" "${_bridge}"
+    switch_manual_init "${_switch}" "${_bridge}"
 }
 
 # remove a manual switch
 #
 # @param string _switch the name of the switch
 #
-switch::manual::remove(){
+switch_manual_remove(){
     local _switch="$1"
     local _id
 
-    switch::manual::id "_id" "${_switch}"
+    switch_manual_id "_id" "${_switch}"
     [ -z "${_id}" ] && return 0
 
     # Manual bridge belongs to the user/system configuration.
@@ -78,25 +78,30 @@ switch::manual::remove(){
 }
 
 # add a new interface to this switch
-# manual switches should be managed by the user
-# using rc.conf, hence "manual"
+# manual switches are meant to be managed directly by the admin, outside
+# vm-bhyve, hence "manual"
+#
+# Linux: there's no single config file equivalent of FreeBSD's rc.conf
+# bridge config here - point at whichever network tool actually owns
+# this bridge (systemd-networkd, NetworkManager, netplan, ifupdown, or
+# a manual 'ip link'/'bridge' command), since that varies by host.
 #
 # @param string _switch name of the switch
 # @param string _if the interface to add
 #
-switch::manual::add_member(){
-    util::err "manual switches and member interfaces should be configured using /etc/rc.conf"
+switch_manual_add_member(){
+    util_err "manual switches and their member interfaces are managed outside vm-bhyve - add ${2} to the bridge yourself (e.g. with 'ip link set ${2} master <bridge>', or via whatever network tool manages this host's interfaces)"
 }
 
 # remove an interface
-# manual switches should be managed by the user
-# using rc.conf, hence "manual"
+# manual switches are meant to be managed directly by the admin, outside
+# vm-bhyve, hence "manual"
 #
 # @param string _switch name of the switch
 # @param string _if the interface to remove
 #
-switch::manual::remove_member(){
-    util::err "manual switches and member interfaces should be configured using /etc/rc.conf"
+switch_manual_remove_member(){
+    util_err "manual switches and their member interfaces are managed outside vm-bhyve - remove ${2} from the bridge yourself"
 }
 
 # set vlan id
@@ -104,8 +109,8 @@ switch::manual::remove_member(){
 # @param string _switch name of switch
 # @param int _vlan vlan id to set
 #
-switch::manual::vlan(){
-    util::err "manual switches and member interfaces should be configured using /etc/rc.conf"
+switch_manual_vlan(){
+    util_err "manual switches are managed outside vm-bhyve - configure the vlan on the bridge yourself"
 }
 
 # get id for a manual switch
@@ -115,6 +120,6 @@ switch::manual::vlan(){
 # @param string _switch switch name
 # @return 0 if switch id found
 #
-switch::manual::id(){
-    config::core::get "$1" "bridge_$2"
+switch_manual_id(){
+    config_core_get "$1" "bridge_$2"
 }

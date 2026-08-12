@@ -21,27 +21,27 @@
 # configuration file have bridge interfaces. If any new switches are
 # created, the create function takes care of setting them up
 #
-switch::init(){
+switch_init(){
     local _switchlist _switch _type
 
-    config::core::get "_switchlist" "switch_list"
+    config_core_get "_switchlist" "switch_list"
 
     if [ -n "${_switchlist}" ]; then
         for _switch in ${_switchlist}; do
             # get the switch type
-            config::core::get "_type" "type_${_switch}"
+            config_core_get "_type" "type_${_switch}"
 
             case "${_type}" in
-                vxlan)    switch::vxlan::init "${_switch}" ;;
-                manual)   switch::manual::init "${_switch}" ;;
+                vxlan)    switch_vxlan_init "${_switch}" ;;
+                manual)   switch_manual_init "${_switch}" ;;
                 vale|netgraph)
                     # non-fatal: this loop covers every switch on the
                     # host, one unsupported entry (e.g. a leftover from
                     # a migrated FreeBSD config) shouldn't stop the
                     # rest from coming up
-                    util::warn "switch ${_switch} is type '${_type}', which isn't supported on Linux - skipping"
+                    util_warn "switch ${_switch} is type '${_type}', which isn't supported on Linux - skipping"
                     ;;
-                *)        switch::standard::init "${_switch}" ;;
+                *)        switch_standard_init "${_switch}" ;;
             esac
         done
     fi
@@ -49,11 +49,11 @@ switch::init(){
 
 # list switches configured
 #
-switch::list(){
+switch_list(){
     local _switchlist _switch _type
     local _id _format="%s^%s^%s^%s^%s^%s^%s^%s\n"
 
-    config::core::get "_switchlist" "switch_list"
+    config_core_get "_switchlist" "switch_list"
 
     {
         printf "${_format}" "NAME" "TYPE" "IFACE" "ADDRESS" "PRIVATE" "MTU" "VLAN" "PORTS"
@@ -61,17 +61,17 @@ switch::list(){
         if [ -n "${_switchlist}" ]; then
             for _switch in ${_switchlist}; do
                 # get the switch type
-                config::core::get "_type" "type_${_switch}"
+                config_core_get "_type" "type_${_switch}"
 
                 case "${_type}" in
-                    vxlan)    switch::vxlan::show "${_switch}" "${_format}" ;;
-                    manual)   switch::manual::show "${_switch}" "${_format}" ;;
+                    vxlan)    switch_vxlan_show "${_switch}" "${_format}" ;;
+                    manual)   switch_manual_show "${_switch}" "${_format}" ;;
                     vale|netgraph)
-                        # same reasoning as switch::init - flag it in
+                        # same reasoning as switch_init - flag it in
                         # the table instead of aborting the whole listing
                         printf "${_format}" "${_switch}" "${_type}" "unsupported-on-linux" "-" "-" "-" "-" "-"
                         ;;
-                    *)        switch::standard::show "${_switch}" "${_format}" ;;
+                    *)        switch_standard_show "${_switch}" "${_format}" ;;
                 esac
             done
         fi
@@ -82,7 +82,7 @@ switch::list(){
 #
 # @param string _switch name of the switch to create
 #
-switch::create(){
+switch_create(){
     local _switch
     local _type="standard"
     local _list _curr _vlan _if _bridge _addr _mtu _priv
@@ -97,7 +97,7 @@ switch::create(){
             a) _addr="${OPTARG}" ;;
             m) _mtu="${OPTARG}" ;;
             p) _priv="yes" ;;
-            *) util::usage ;;
+            *) util_usage ;;
         esac
     done
 
@@ -105,44 +105,44 @@ switch::create(){
     _switch="$1"
 
     # check for a valid switch name
-    util::check_name "${_switch}" || util::err "invalid switch name - '${_switch}'"
+    util_check_name "${_switch}" || util_err "invalid switch name - '${_switch}'"
 
     # make sure it's not an existing name
-    config::core::get "_list" "switch_list"
+    config_core_get "_list" "switch_list"
 
     for _curr in ${_list}; do
-        [ "${_switch}" = "${_curr}" ] && util::err "switch ${_switch} already exists"
+        [ "${_switch}" = "${_curr}" ] && util_err "switch ${_switch} already exists"
     done
 
     # check vlan number
     if [ -n "${_vlan}" ]; then
         echo "${_vlan}" | egrep -qs '^[0-9]{1,4}$'
-        [ $? -eq 0 ] || util::err "invalid vlan number"
-        [ ${_vlan} -ge 4095 ] && util::err "invalid vlan number"
+        [ $? -eq 0 ] || util_err "invalid vlan number"
+        [ ${_vlan} -ge 4095 ] && util_err "invalid vlan number"
     fi
 
     # check address
     if [ -n "${_addr}" ]; then
-        util::validate_cidr "${_addr}"
-        [ $? -eq 0 ] || util::err "address must be supplied in CIDR notation (e.g. 192.0.2.1/24, 3fff::1/64)"
+        util_validate_cidr "${_addr}"
+        [ $? -eq 0 ] || util_err "address must be supplied in CIDR notation (e.g. 192.0.2.1/24, 3fff_1/64)"
     fi
 
     # check mtu
     if [ -n "${_mtu}" ]; then
         echo "${_mtu}" | egrep -qs '^[0-9]{3,4}$'
-        [ $? -eq 0 ] || util::err "invalid mtu"
-        [ ${_mtu} -gt 9000 ] && util::err "invalid mtu"
+        [ $? -eq 0 ] || util_err "invalid mtu"
+        [ ${_mtu} -gt 9000 ] && util_err "invalid mtu"
     fi
 
     # check switch type
     case "${_type}" in
-        standard) switch::standard::create ;;
-        manual)   switch::manual::create ;;
-        vxlan)    switch::vxlan::create ;;
+        standard) switch_standard_create ;;
+        manual)   switch_manual_create ;;
+        vxlan)    switch_vxlan_create ;;
         vale|netgraph)
-            util::err "switch type '${_type}' is not supported on Linux"
+            util_err "switch type '${_type}' is not supported on Linux"
             ;;
-        *)        util::err "invalid switch type - '${_type}'" ;;
+        *)        util_err "invalid switch type - '${_type}'" ;;
     esac
 }
 
@@ -151,36 +151,36 @@ switch::create(){
 #
 # @param string _switch name of the switch to remove
 #
-switch::remove(){
+switch_remove(){
     local _switch="$1"
     local _type
 
-    [ -z "${_switch}" ] && util::usage
+    [ -z "${_switch}" ] && util_usage
 
     # get the type of switch
-    config::core::get "_type" "type_${_switch}"
+    config_core_get "_type" "type_${_switch}"
 
     case "${_type}" in
-        standard) switch::standard::remove "${_switch}" ;;
-        manual)   switch::manual::remove "${_switch}" ;;
-        vxlan)    switch::vxlan::remove "${_switch}" ;;
+        standard) switch_standard_remove "${_switch}" ;;
+        manual)   switch_manual_remove "${_switch}" ;;
+        vxlan)    switch_vxlan_remove "${_switch}" ;;
         vale|netgraph)
-            util::err "switch type '${_type}' is not supported on Linux"
+            util_err "switch type '${_type}' is not supported on Linux"
             ;;
-        *)        util::err "unable to remove switch of unknown type" ;;
+        *)        util_err "unable to remove switch of unknown type" ;;
     esac
 
     # remove all configuration if there's no error
     if [ $? -eq 0 ]; then
-        config::core::remove "switch_list" "${_switch}"
-        config::core::remove "ports_${_switch} vlan_${_switch} nat_${_switch} type_${_switch}"
-        config::core::remove "addr_${_switch} addr6_${_switch} private_${_switch} mtu_${_switch}"
+        config_core_remove "switch_list" "${_switch}"
+        config_core_remove "ports_${_switch} vlan_${_switch} nat_${_switch} type_${_switch}"
+        config_core_remove "addr_${_switch} addr6_${_switch} private_${_switch} mtu_${_switch}"
     else
-        util::err "failed to remove virtual switch"
+        util_err "failed to remove virtual switch"
     fi
 
     # make sure the exit status indicates success,
-    # even if config::core::remove did not
+    # even if config_core_remove did not
     return 0
 }
 
@@ -189,24 +189,24 @@ switch::remove(){
 # @param string _switch name of the switch
 # @param string _if the interface to add
 #
-switch::add_member(){
+switch_add_member(){
     local _switch="$1"
     local _if="$2"
     local _type
 
-    [ -z "${_switch}" -o -z "${_if}" ] && util::usage
+    [ -z "${_switch}" -o -z "${_if}" ] && util_usage
 
     # get the type of switch
-    config::core::get "_type" "type_${_switch}"
+    config_core_get "_type" "type_${_switch}"
 
     case "${_type}" in
-        standard) switch::standard::add_member "${_switch}" "${_if}" ;;
-        manual)   switch::manual::add_member "${_switch}" "${_if}" ;;
-        vxlan)    switch::vxlan::add_member "${_switch}" "${_if}" ;;
+        standard) switch_standard_add_member "${_switch}" "${_if}" ;;
+        manual)   switch_manual_add_member "${_switch}" "${_if}" ;;
+        vxlan)    switch_vxlan_add_member "${_switch}" "${_if}" ;;
         vale|netgraph)
-            util::err "switch type '${_type}' is not supported on Linux"
+            util_err "switch type '${_type}' is not supported on Linux"
             ;;
-        *)        util::err "unable to configure switch of unknown type" ;;
+        *)        util_err "unable to configure switch of unknown type" ;;
     esac
 }
 
@@ -215,24 +215,24 @@ switch::add_member(){
 # @param string _switch name of the switch
 # @param string _if the interface to remove
 #
-switch::remove_member(){
+switch_remove_member(){
     local _switch="$1"
     local _if="$2"
     local _type
 
-    [ -z "${_switch}" -o -z "${_if}" ] && util::usage
+    [ -z "${_switch}" -o -z "${_if}" ] && util_usage
 
     # get the type of switch
-    config::core::get "_type" "type_${_switch}"
+    config_core_get "_type" "type_${_switch}"
 
     case "${_type}" in
-        standard) switch::standard::remove_member "${_switch}" "${_if}" ;;
-        manual)   switch::manual::remove_member "${_switch}" "${_if}" ;;
-        vxlan)    switch::vxlan::remove_member "${_switch}" "${_if}" ;;
+        standard) switch_standard_remove_member "${_switch}" "${_if}" ;;
+        manual)   switch_manual_remove_member "${_switch}" "${_if}" ;;
+        vxlan)    switch_vxlan_remove_member "${_switch}" "${_if}" ;;
         vale|netgraph)
-            util::err "switch type '${_type}' is not supported on Linux"
+            util_err "switch type '${_type}' is not supported on Linux"
             ;;
-        *)        util::err "unable to configure switch of unknown type" ;;
+        *)        util_err "unable to configure switch of unknown type" ;;
     esac
 }
 
@@ -241,29 +241,29 @@ switch::remove_member(){
 # @param string _switch name of the switch
 # @param int _vlan the vlan number (0 to turn vlan off)
 #
-switch::vlan(){
+switch_vlan(){
     local _switch="$1"
     local _vlan="$2"
     local _id _type
 
-    [ -z "${_switch}" -o -z "${_vlan}" ] && util::usage
+    [ -z "${_switch}" -o -z "${_vlan}" ] && util_usage
 
-    switch::id "_id" "${_switch}"
-    switch::type "_type" "${_switch}"
-    [ -z "${_id}" ] && util::err "unable to locate specified virtual switch"
+    switch_id "_id" "${_switch}"
+    switch_type "_type" "${_switch}"
+    [ -z "${_id}" ] && util_err "unable to locate specified virtual switch"
 
     echo "${_vlan}" | egrep -qs '^[0-9]{1,4}$'
-    [ $? -eq 0 ] || util::err "invalid vlan number"
-    [ ${_vlan} -ge 4095 ] && util::err "invalid vlan number"
+    [ $? -eq 0 ] || util_err "invalid vlan number"
+    [ ${_vlan} -ge 4095 ] && util_err "invalid vlan number"
 
     case "${_type}" in
-        standard) switch::standard::vlan "${_switch}" "${_vlan}" ;;
-        manual)   switch::manual::vlan "${_switch}" "${_vlan}" ;;
-        vxlan)    switch::vxlan::vlan "${_switch}" "${_vlan}" ;;
+        standard) switch_standard_vlan "${_switch}" "${_vlan}" ;;
+        manual)   switch_manual_vlan "${_switch}" "${_vlan}" ;;
+        vxlan)    switch_vxlan_vlan "${_switch}" "${_vlan}" ;;
         vale|netgraph)
-            util::err "switch type '${_type}' is not supported on Linux"
+            util_err "switch type '${_type}' is not supported on Linux"
             ;;
-        *)        util::err "unable to configure switch of unknown type" ;;
+        *)        util_err "unable to configure switch of unknown type" ;;
     esac
 }
 
@@ -275,28 +275,28 @@ switch::vlan(){
 # @param string _switch the switch to update
 # @param string _priv on,yes|off,no
 #
-switch::private(){
+switch_private(){
     local _switch="$1"
     local _priv="$2"
     local _type
 
     # try to get switch type
-    [ -z "${_switch}" -o -z "${_priv}" ] && util::usage
-    switch::type "_type" "${_switch}" || util::err "specified switch does not appear to be valid"
+    [ -z "${_switch}" -o -z "${_priv}" ] && util_usage
+    switch_type "_type" "${_switch}" || util_err "specified switch does not appear to be valid"
 
     case "${_type}" in
         standard|manual|vxlan)
-            if util::yesno "${_priv}"; then
-                config::core::set "private_${_switch}" "yes"
+            if util_yesno "${_priv}"; then
+                config_core_set "private_${_switch}" "yes"
             else
-                config::core::set "private_${_switch}" "no"
+                config_core_set "private_${_switch}" "no"
             fi
             ;;
         vale|netgraph)
-            util::err "switch type '${_type}' is not supported on Linux"
+            util_err "switch type '${_type}' is not supported on Linux"
             ;;
         *)
-            util::err "unable to configure switch of unknown type"
+            util_err "unable to configure switch of unknown type"
             ;;
     esac
 }
@@ -306,9 +306,9 @@ switch::private(){
 # @param string _switch name of the switch
 # @param string _nat on|off
 #
-switch::nat(){
-    util::warn "internal nat support is currently disabled"
-    util::warn "please add an address to the virtual switch and configure your firewall for NAT manually"
+switch_nat(){
+    util_warn "internal nat support is currently disabled"
+    util_warn "please add an address to the virtual switch and configure your firewall for NAT manually"
 }
 
 # set or remove ip address from a virtual switch
@@ -316,32 +316,32 @@ switch::nat(){
 # @param string _switch name of the switch
 # @param string _addr the ip address to add (or "none" to remove
 #
-switch::address(){
+switch_address(){
     local _switch="$1"
     local _addr="$2"
     local _delete="$3"
     local _id _type
 
-    [ -z "${_switch}" ] && util::usage
+    [ -z "${_switch}" ] && util_usage
 
-    switch::id "_id" "${_switch}"
-    switch::type "_type" "${_switch}"
-    [ -z "${_id}" ] && util::err "unable to locate specified virtual switch"
+    switch_id "_id" "${_switch}"
+    switch_type "_type" "${_switch}"
+    [ -z "${_id}" ] && util_err "unable to locate specified virtual switch"
 
     # check address
     if [ -n "${_addr}" ] && [ "${_addr}" != "none" ]; then
-        util::validate_cidr "${_addr}"
-        [ $? -eq 0 ] || util::err "address must be supplied in cidr notation (e.g. 192.0.2.1/24, 3fff::1/64)"
+        util_validate_cidr "${_addr}"
+        [ $? -eq 0 ] || util_err "address must be supplied in cidr notation (e.g. 192.0.2.1/24, 3fff_1/64)"
     fi
 
     case "${_type}" in
-        standard) switch::standard::address "${_switch}" "${_addr}" "${_delete}";;
+        standard) switch_standard_address "${_switch}" "${_addr}" "${_delete}";;
         manual)   ;&
-        vxlan)    util::err "feature not currently supported on switches of this type" ;;
+        vxlan)    util_err "feature not currently supported on switches of this type" ;;
         vale|netgraph)
-            util::err "switch type '${_type}' is not supported on Linux"
+            util_err "switch type '${_type}' is not supported on Linux"
             ;;
-        *)        util::err "unable to configure switch of unknown type" ;;
+        *)        util_err "unable to configure switch of unknown type" ;;
     esac
 }
 
@@ -350,12 +350,12 @@ switch::address(){
 # @param string _var variable to put type into
 # @param string _switch the switch name
 #
-switch::type(){
+switch_type(){
     local _var="$1"
     local _switch="$2"
 
     [ -z "${_switch}" ] && return 1
-    config::core::get "${_var}" "type_${_switch}" "standard"
+    config_core_get "${_var}" "type_${_switch}" "standard"
 }
 
 # check if a switch is configured for private members
@@ -363,12 +363,12 @@ switch::type(){
 # @param string _switch switch name
 # @return succes (0) if it's private
 #
-switch::is_private(){
+switch_is_private(){
     local _switch="$1"
     local _priv
 
-    config::core::get "_priv" "private_${_switch}"
-    util::yesno "${_priv}"
+    config_core_get "_priv" "private_${_switch}"
+    util_yesno "${_priv}"
 }
 
 # get the bridge id for a virtual switch
@@ -376,7 +376,7 @@ switch::is_private(){
 # @param string _var variable to put name into
 # @param string _switch the name of the switch
 #
-switch::id(){
+switch_id(){
     local _var="$1"
     local _switch="$2"
     local _type
@@ -384,14 +384,14 @@ switch::id(){
     [ -z "${_switch}" ] && return 1
 
     # get switch type
-    config::core::get "_type" "type_${_switch}"
+    config_core_get "_type" "type_${_switch}"
 
     case "${_type}" in
-        manual)   switch::manual::id "${_var}" "${_switch}" ;;
+        manual)   switch_manual_id "${_var}" "${_switch}" ;;
         vale|netgraph)
-            util::err "switch type '${_type}' is not supported on Linux"
+            util_err "switch type '${_type}' is not supported on Linux"
             ;;
-        *)        switch::standard::id "${_var}" "${_switch}" ;;
+        *)        switch_standard_id "${_var}" "${_switch}" ;;
     esac
 }
 
@@ -406,7 +406,7 @@ switch::id(){
 # @param string _var variable name to put result into
 # @param string _switch switch name to get id for
 #
-switch::__viid(){
+switch___viid(){
     setvar "$1" "vm-switch/${2}"
 }
 
@@ -416,12 +416,12 @@ switch::__viid(){
 # @param string _var variable to put interface name into
 # @param string _switch the switch name
 #
-switch::find(){
+switch_find(){
     local _var="$1"
     local _switch="$2"
     local _viid _f _alias
 
-    switch::__viid "_viid" "${_switch}"
+    switch___viid "_viid" "${_switch}"
 
     for _f in /sys/class/net/*/ifalias; do
         [ -r "${_f}" ] || continue
@@ -441,38 +441,38 @@ switch::find(){
 # @parem string _switch switch name
 # @param string _iface interface to mark
 #
-switch::set_viid(){
+switch_set_viid(){
     local _switch="$1"
     local _iface="$2"
     local _viid
 
-    switch::__viid "_viid" "${_switch}"
+    switch___viid "_viid" "${_switch}"
     ip link set dev "${_iface}" alias "${_viid}" >/dev/null 2>&1
 }
 
 # create a network interface for a guest
-# relies heavily on variables set in the main vm::run function
+# relies heavily on variables set in the main vm_run function
 #
 # @modifies _func _devices
 #
-switch::provision(){
+switch_provision(){
     local _switch _mac _type
 
-    config::get "_switch" "network${_num}_switch"
-    config::get "_mac" "network${_num}_mac"
+    config_get "_switch" "network${_num}_switch"
+    config_get "_mac" "network${_num}_mac"
 
     # set a static mac if we don't have one
-    [ -z "${_mac}" ] && vm::generate_static_mac
+    [ -z "${_mac}" ] && vm_generate_static_mac
 
-    switch::type "_type" "${_switch}"
+    switch_type "_type" "${_switch}"
 
     case "${_type}" in
         standard) ;&
         manual)   ;&
-        vxlan)    switch::standard::provision ;;
+        vxlan)    switch_standard_provision ;;
         vale|netgraph)
-            util::warn "switch type '${_type}' is not supported on Linux - interface ${_num} not configured"
+            util_warn "switch type '${_type}' is not supported on Linux - interface ${_num} not configured"
             ;;
-        *)        util::warn "unable to configure interface ${_num}" ;;
+        *)        util_warn "unable to configure interface ${_num}" ;;
     esac
 }

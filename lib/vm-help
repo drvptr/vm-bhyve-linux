@@ -4,21 +4,21 @@
 # Help
 
 # Help of help
-help::_help(){
-    util::usage
+help__help(){
+    util_usage
     exit
 }
 
-help::show(){
+help_show(){
     local _help_cmd
 
-    cmd::find "_help_cmd" "$1" "${CMD_VALID_LIST}"
+    cmd_find "_help_cmd" "$1" "${CMD_VALID_LIST}"
 
-    [ -z "${_help_cmd}" ] && help::_help
+    [ -z "${_help_cmd}" ] && help__help
 
 
     case "${_help_cmd}" in
-        usage|version|init)  util::usage ;; # no help
+        usage|version|init)  util_usage ;; # no help
         get|set)             _help_cmd=get_set ;;
         configure|edit)      _help_cmd=configure ;;
     esac
@@ -53,8 +53,8 @@ Usage:
     vm switch create [options] <name>
     vm switch vlan <name> <vlan-id>
     vm switch nat <name> <on|off>
-    vm switch address <name> <a.b.c.d/xx|3fff::abcd/xx|none>
-    vm switch address <name> <a.b.c.d/xx|3fff::abcd/xx> delete
+    vm switch address <name> <a.b.c.d/xx|3fff_abcd/xx|none>
+    vm switch address <name> <a.b.c.d/xx|3fff_abcd/xx> delete
     vm switch private <name> <on|off>
     vm switch add <name> <interface>
     vm switch remove <name> <interface>
@@ -150,7 +150,7 @@ Examples:
     vm create -t linux -c 4 -i example.qcow2 -C -k .ssh/authorized_keys linux3
     vm create -m 4G freebsd1
     vm create ... -C \\
-       -n \"ip=10.0.0.2/24,2001:db8::1234/64;nameservers=8.8.8.8\" netexample1
+       -n \"ip=10.0.0.2/24,2001:db8_1234/64;nameservers=8.8.8.8\" netexample1
 "
 
 #------------------------------------------------------------------------------

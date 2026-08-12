@@ -9,12 +9,12 @@
 # supported hardware is detected, and QEMU creates its own TAP interfaces
 # on demand - there's nothing to pre-load the way FreeBSD's 'kldload vmm'
 # requires. If /dev/kvm is still missing, make one best-effort attempt to
-# load the modules ourselves (util::load_vmm) before giving up.
+# load the modules ourselves (util_load_vmm) before giving up.
 #
-util::setup(){
+util_setup(){
     if [ ! -e /dev/kvm ]; then
-        util::load_vmm
-        [ -e /dev/kvm ] || util::err "KVM is not available (/dev/kvm missing) - check virtualisation is enabled in firmware and the kvm kernel module is loaded"
+        util_load_vmm
+        [ -e /dev/kvm ] || util_err "KVM is not available (/dev/kvm missing) - check virtualisation is enabled in firmware and the kvm kernel module is loaded"
     fi
 }
 
@@ -24,13 +24,13 @@ util::setup(){
 #
 # @param string _mod the module name
 #
-util::load_module(){
+util_load_module(){
     local _mod="$1"
 
     lsmod | awk '{print $1}' | grep -qx "${_mod}" && return 0
 
     modprobe "${_mod}" >/dev/null 2>&1
-    [ $? -eq 0 ] || util::err "unable to load ${_mod}"
+    [ $? -eq 0 ] || util_err "unable to load ${_mod}"
 }
 
 # load the kvm kernel module (and the vendor-specific one alongside it)
@@ -45,7 +45,7 @@ util::load_module(){
 #         1: failure to load
 #         2: not supported (loaded, but /dev/kvm still missing)
 #
-util::load_vmm(){
+util_load_vmm(){
     local _rc
 
     [ -e /dev/kvm ] && return 0
@@ -71,32 +71,32 @@ util::load_vmm(){
 #
 # @return 0 if QEMU/KVM is available
 #
-util::check_bhyve_support(){
+util_check_bhyve_support(){
     # vm-bhyve-qemu requires root for most management operations
     [ "$(id -u)" -ne 0 ] && \
-        util::err "virtual machines can only be managed as root"
+        util_err "virtual machines can only be managed as root"
 
     # allow bypassing host checks
-    util::yesno "$vm_disable_host_checks" && return 0
+    util_yesno "$vm_disable_host_checks" && return 0
 
     # check that QEMU is installed
     if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
-        util::err "qemu-system-x86_64 is not installed"
+        util_err "qemu-system-x86_64 is not installed"
     fi
 
     # check that KVM device exists
     if [ ! -e /dev/kvm ]; then
-        util::err "KVM is not available: /dev/kvm does not exist"
+        util_err "KVM is not available: /dev/kvm does not exist"
     fi
 
     # check that KVM is accessible
     if [ ! -r /dev/kvm ] || [ ! -w /dev/kvm ]; then
-        util::err "KVM is not accessible: check permissions on /dev/kvm"
+        util_err "KVM is not accessible: check permissions on /dev/kvm"
     fi
 
     # check that the kernel exposes KVM
     if [ ! -e /sys/module/kvm ]; then
-        util::err "KVM kernel module is not loaded"
+        util_err "KVM kernel module is not loaded"
     fi
 
     # check architecture
@@ -104,7 +104,7 @@ util::check_bhyve_support(){
         x86_64|amd64)
             ;;
         *)
-            util::err "unsupported host architecture: $(uname -m)"
+            util_err "unsupported host architecture: $(uname -m)"
             ;;
     esac
 }
@@ -117,8 +117,8 @@ util::check_bhyve_support(){
 #
 # @return success if host has vt-d or amdvi
 #
-util::check_bhyve_iommu(){
-    util::yesno "$vm_disable_host_checks" && return 0
+util_check_bhyve_iommu(){
+    util_yesno "$vm_disable_host_checks" && return 0
 
     [ -d /sys/kernel/iommu_groups ] && [ -n "$(ls -A /sys/kernel/iommu_groups 2>/dev/null)" ] && return 0
 
@@ -129,13 +129,13 @@ util::check_bhyve_iommu(){
 #
 # Linux/QEMU: unlike bhyve (where snapshot/suspend support depends on how
 # the binary was built), QEMU's migrate-to-file mechanism - what
-# core::suspend and vm::run's -incoming handling both use - is a
+# core_suspend and vm_run's -incoming handling both use - is a
 # standard, always-available feature of any reasonably current QEMU.
 # There's no equivalent "your build might not support this" case here.
 #
 # @return success - always, see above
 #
-util::check_bhyve_suspend(){
+util_check_bhyve_suspend(){
     return 0
 }
 
@@ -148,14 +148,14 @@ util::check_bhyve_suspend(){
 #
 # @param string _serv the name of the service
 #
-util::restart_service(){
+util_restart_service(){
     local _serv="$1"
     local _cmd="restart"
 
     if command -v systemctl >/dev/null 2>&1; then
         systemctl is-active --quiet "${_serv}" || _cmd="start"
         systemctl "${_cmd}" "${_serv}" >/dev/null 2>&1
-        [ $? -eq 0 ] || util::warn "failed to ${_cmd} service ${_serv}"
+        [ $? -eq 0 ] || util_warn "failed to ${_cmd} service ${_serv}"
         return
     fi
 
@@ -164,20 +164,20 @@ util::restart_service(){
     [ $? -ne 0 ] && _cmd="start"
 
     service ${_serv} ${_cmd} >/dev/null 2>&1
-    [ $? -ne 0 ] && util::warn "failed to ${_cmd} service ${_serv}"
+    [ $? -ne 0 ] && util_warn "failed to ${_cmd} service ${_serv}"
 }
 
 # show version
 #
-util::version(){
+util_version(){
     echo "vm-bhyve: QEMU virtual machine management v${VERSION}"
 }
 
 # show version & usage information
 # we exit after running this
 #
-util::usage(){
-    util::version
+util_usage(){
+    util_version
     cat << EOT
 
 Available subcommands grouped by scenario:
@@ -239,7 +239,7 @@ EOT
 #
 # @param string - the message to display
 #
-util::err(){
+util_err(){
     echo "${0}: ERROR: $1" >&2
     exit 1
 }
@@ -249,7 +249,7 @@ util::err(){
 #
 # @param string - message to display
 #
-util::err_inline(){
+util_err_inline(){
     echo "  ! $1"
     exit 1
 }
@@ -259,7 +259,7 @@ util::err_inline(){
 #
 # @param string - the message to display
 #
-util::warn(){
+util_warn(){
     echo "${0}: WARNING: $1" >&2
 }
 
@@ -273,7 +273,7 @@ util::warn(){
 #
 # @param string _type whether to rotate guest or main log
 #
-util::log_rotate(){
+util_log_rotate(){
     local _type="$1"
     local _lf="vm-bhyve.log"
     local _file _size _guest
@@ -311,7 +311,7 @@ util::log_rotate(){
 # @param optional string _guest if _type=guest, the guest name, otherwise do not provide at all
 # @param string _message the message to log
 #
-util::log(){
+util_log(){
     local _type="$1"
     local _lf="vm-bhyve.log"
     local _guest _message _file _date
@@ -345,20 +345,20 @@ util::log(){
 # @param string _file the file name to write to
 # @param string _message the data to write
 #
-util::log_and_write(){
+util_log_and_write(){
     local _type="$1"
     local _guest="$2"
     local _file="${VM_DS_PATH}/${_guest}/$3"
     local _message="$4"
 
     if [ "${_type}" = "write" ]; then
-        util::log "guest" "${_guest}" "create file ${_file}"
+        util_log "guest" "${_guest}" "create file ${_file}"
         echo "${_message}" > "${_file}"
     else
         echo "${_message}" >> "${_file}"
     fi
 
-    util::log "guest" "${_guest}" " -> ${_message}"
+    util_log "guest" "${_guest}" " -> ${_message}"
 }
 
 # confirm yes or no
@@ -366,7 +366,7 @@ util::log_and_write(){
 # @param string _msh message to display
 # @return int success if confirmed
 #
-util::confirm(){
+util_confirm(){
     local _msg="$1"
     local _resp
 
@@ -385,7 +385,7 @@ util::confirm(){
 # @param _value the value to test
 # @return int 1 if set to "off/false/no/0", 0 otherwise
 #
-util::yesno(){
+util_yesno(){
     local _value="$1"
 
     [ -z "${_value}" ] && return 1
@@ -404,7 +404,7 @@ util::yesno(){
 # @param _maxlen=30(229 on 13+) maximum name length (NOTE should be 2 less than desired)
 # @return int 0 if name is valid
 #
-util::check_name(){
+util_check_name(){
     local _name="$1"
     local _maxlen="$2"
 
@@ -420,7 +420,7 @@ util::check_name(){
 #
 # @param string the setting name to look for
 #
-util::valid_config_setting(){
+util_valid_config_setting(){
     echo "${VM_CONFIG_USER}" | grep -iqs "${1};"
 }
 
@@ -432,7 +432,7 @@ util::valid_config_setting(){
 # @param string _var variable to put pid into
 # @param string _proc process to look for
 #
-util::getpid(){
+util_getpid(){
     local _var="$1"
     local _proc="$2"
     local _ret
@@ -442,7 +442,7 @@ util::getpid(){
     setvar "${_var}" "${_ret}"
 }
 
-util::get_part(){
+util_get_part(){
     local _var="$1"
     local _data="$2"
     local _num="$3"
@@ -456,7 +456,7 @@ util::get_part(){
 #
 # @param string
 #
-util::pad_spaces(){
+util_pad_spaces(){
     printf "%*s" "${#1}" ""
 }
 
@@ -475,7 +475,7 @@ util::pad_spaces(){
 #
 # @param string IPv4 or IPv6 CIDR expression
 #
-util::validate_cidr(){
+util_validate_cidr(){
     case "$1" in
         */[0-9]*)
             echo "$1" | egrep -iqs \

@@ -7,25 +7,41 @@ VERSION=1.8-devel
 VERSION_OS=$(uname -s)
 PATH=${PATH}:/bin:/usr/bin:/usr/local/bin:/sbin:/usr/sbin:/usr/local/sbin
 
-#I don't know what to replace it with. Commented.
-#. /etc/rc.subr
-#load_rc_config "vm"
+# Linux replacement for FreeBSD's rc.subr/load_rc_config: read $vm_dir and
+# the other vm_* settings from a plain shell config file. First readable
+# file wins; anything already set in the environment overrides the file.
+for _f in /etc/vm-bhyve.conf /etc/default/vm-bhyve /usr/local/etc/vm-bhyve.conf; do
+    if [ -r "${_f}" ]; then
+        _env_vm_dir="${vm_dir}"
+        . "${_f}"
+        [ -n "${_env_vm_dir}" ] && vm_dir="${_env_vm_dir}"
+        unset _env_vm_dir
+        break
+    fi
+done
+unset _f
+
+[ -z "${vm_dir}" ] && {
+    echo "vm: ERROR: \$vm_dir is not set." >&2
+    echo "    Create /etc/vm-bhyve.conf containing e.g.  vm_dir=\"/var/lib/vm-bhyve\"" >&2
+    exit 1
+}
 
 # check informational commands
-cmd::parse_info "$@"
+cmd_parse_info "$@"
 
 # we should be enabled in rc.conf
 # or call it using forcestart
-#[ -z "$rc_force" ] && ! checkyesno vm_enable && util::err "\$vm_enable is not enabled in /etc/rc.conf!"
+#[ -z "$rc_force" ] && ! checkyesno vm_enable && util_err "\$vm_enable is not enabled in /etc/rc.conf!"
 
 # check we can run bhyve
-util::check_bhyve_support
+util_check_bhyve_support
 
 # init for zfs
-zfs::init
+zfs_init
 
 # create directories as needed
-[ ! -d "${vm_dir}" ] && util::err "\$vm_dir has not been configured or is not a valid directory"
+[ ! -d "${vm_dir}" ] && util_err "\$vm_dir has not been configured or is not a valid directory"
 [ ! -d "${vm_dir}/.config" ] && mkdir "${vm_dir}/.config"
 [ ! -e "${vm_dir}/.config/null.iso" ] && touch "${vm_dir}/.config/null.iso"
 [ ! -d "${vm_dir}/.templates" ] && mkdir "${vm_dir}/.templates"
@@ -33,8 +49,8 @@ zfs::init
 [ ! -d "${vm_dir}/.img" ] && mkdir "${vm_dir}/.img"
 
 # load core configuration
-config::core::load
-datastore::load
+config_core_load
+datastore_load
 
 # run the requested command
-cmd::parse "$@"
+cmd_parse "$@"

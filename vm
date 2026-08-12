@@ -1,16 +1,40 @@
-#!/bin/sh
+#!/bin/bash
 # SPDX-License-Identifier: BSD-2-Clause
 # SPDX-FileCopyrightText: 2016 Matt Churchyard <churchers@gmail.com>
+#
+# NOTE ON THE SHEBANG
+# ~~~~~~~~~~~~~~~~~~~
+# This must be bash, not /bin/sh. The libraries use namespaced function
+# names such as core_init() and util_err(). FreeBSD's /bin/sh accepts
+# those; on Linux /bin/sh is dash (Debian/Ubuntu) or bash in POSIX mode
+# (Fedora/RHEL), and both reject them with "Bad function name" /
+# "not a valid identifier" before a single line of the tool ever runs.
 
 # get libs
-if [ -e "/usr/local/lib/vm-bhyve" ]; then
+# this line is rewritten by "make install" to match $PREFIX
+VM_BHYVE_LIB_DEFAULT="/usr/local/lib/vm-bhyve"
+
+# $VM_BHYVE_LIB wins if set, then the configured prefix, then the usual
+# distribution paths, and finally a source checkout run in place.
+if [ -n "${VM_BHYVE_LIB}" ] && [ -d "${VM_BHYVE_LIB}" ]; then
+    LIB="${VM_BHYVE_LIB}"
+elif [ -d "${VM_BHYVE_LIB_DEFAULT}" ]; then
+    LIB="${VM_BHYVE_LIB_DEFAULT}"
+elif [ -d "/usr/local/lib/vm-bhyve" ]; then
     LIB="/usr/local/lib/vm-bhyve"
+elif [ -d "/usr/lib/vm-bhyve" ]; then
+    LIB="/usr/lib/vm-bhyve"
+elif [ -d "$(dirname "$(readlink -f "$0")")/lib" ]; then
+    LIB="$(dirname "$(readlink -f "$0")")/lib"
 else
-    echo "unable to locate vm-bhyve libraries"
+    echo "unable to locate vm-bhyve libraries" >&2
     exit 1
 fi
 
 # load libs
+# vm-compat provides replacements for FreeBSD-only builtins and must come
+# first; vm-base runs the requested command and must come last.
+. "${LIB}/vm-compat"
 . "${LIB}/vm-cmd"
 . "${LIB}/vm-config"
 . "${LIB}/vm-core"
@@ -25,5 +49,4 @@ fi
 . "${LIB}/vm-tags"
 . "${LIB}/vm-util"
 . "${LIB}/vm-zfs"
-
 . "${LIB}/vm-base"

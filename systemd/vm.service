@@ -1,10 +1,16 @@
 [Unit]
-Description=Start and stop vm-bhyve-qemu guests
+Description=vm-bhyve-qemu guests
+Documentation=man:vm(8)
 Requires=vm-network.service
 After=vm-network.service
+ConditionPathExists=/dev/kvm
 
 [Service]
 Type=oneshot
 RemainAfterExit=yes
 ExecStart=/usr/local/sbin/vm startall
-ExecStop=/usr/local/sbin/vm stopall -f
+ExecStop=/usr/local/sbin/vm stopall
+TimeoutStopSec=300
+
+[Install]
+WantedBy=multi-user.target

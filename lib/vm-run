@@ -16,15 +16,15 @@
 #
 # 2. No separate bootloader pass. bhyveload/grub-bhyve exist because bhyve
 #    has no firmware of its own for BIOS-mode boots. QEMU has SeaBIOS (and
-#    OVMF for UEFI) built in, so guest::load and everything around _com is
+#    OVMF for UEFI) built in, so guest_load and everything around _com is
 #    gone entirely.
 #
 # 3. QEMU survives a guest-initiated reboot inside the same process - bhyve
 #    does not, which is *why* the original has a "while true; run bhyve;
 #    check exit code; maybe loop" structure. Under QEMU that loop now only
-#    ever re-executes for an explicit 'vm restart' (see vm::handle_exit) -
+#    ever re-executes for an explicit 'vm restart' (see vm_handle_exit) -
 #    a normal in-guest reboot just keeps running, no wrapper involvement.
-#    on_restart is therefore a no-op here; see vm::handle_exit for why.
+#    on_restart is therefore a no-op here; see vm_handle_exit for why.
 #
 # 4. Install media now uses '-boot once=d' (boot the CD once, then fall
 #    through to the normal boot order on any later internal reset) instead
@@ -35,14 +35,14 @@
 # Known rough edges / assumptions, called out again inline where relevant:
 #  - OVMF firmware path is guessed (Debian/Ubuntu default) - adjust for
 #    your distro if it's somewhere else.
-#  - Audio uses pipewire; change vm::qemu_device_sound if your host uses
+#  - Audio uses pipewire; change vm_qemu_device_sound if your host uses
 #    pulseaudio/alsa instead.
 #  - graphics_res / VNC "wait" can't be replicated exactly (see
-#    vm::qemu_device_fbuf) - the guest boots CPU-paused instead, you need
+#    vm_qemu_device_fbuf) - the guest boots CPU-paused instead, you need
 #    to resume it yourself via QMP once connected.
-#  - vm::qemu_device_networking still just loops and calls switch::provision
+#  - vm_qemu_device_networking still just loops and calls switch_provision
 #    per interface, same as the original - actually building the QEMU
-#    -netdev/-device args for a tap is switch::standard::provision's job
+#    -netdev/-device args for a tap is switch_standard_provision's job
 #    (in vm-switch-standard, not this file). It needs to tag every tap it
 #    creates with 'ip link set <tap> alias "vmnet/<name>/<num>/<switch>"'
 #    to match what vm-switch.sh/vm-info.sh already expect to find.
@@ -56,23 +56,23 @@
 # @param string _name the name of the guest to run
 # @param optional string _iso the iso file for an install
 #
-vm::run(){
+vm_run(){
     local _name _iso _iso_dev
     local _cpu _memory _bootdisk _bootdisk_dev _uuid _debug _loader
     local _opts _devices _taplist _exit _passdev
     local _comports _comstring _logpath="/dev/null" _run=1
     local _qemu_options _bhyve_options _action _boot_opt _accel _pid _tap _seedcmd
 
-    cmd::parse_args "$@"
+    cmd_parse_args "$@"
     shift $?
     _name="$1"
     _iso="$2"
 
     # try to load datastore details
-    datastore::get_guest "${_name}" || exit 5
+    datastore_get_guest "${_name}" || exit 5
 
     # bail out immediately if guest running
-    vm::confirm_stopped "${_name}" "1" || exit 10
+    vm_confirm_stopped "${_name}" "1" || exit 10
 
     if [ -d "${VM_DS_PATH}/${_name}/.cloud-init" ] && [ ! -f "${VM_DS_PATH}/${_name}/seed.iso" ]; then
         # Linux: makefs -t cd9660 doesn't exist here - genisoimage (or its
@@ -83,43 +83,43 @@ vm::run(){
         elif command -v xorriso >/dev/null 2>&1; then
             _seedcmd="xorriso -as genisoimage"
         else
-            util::err "genisoimage (or xorriso) is required to build seed.iso for cloud-init"
+            util_err "genisoimage (or xorriso) is required to build seed.iso for cloud-init"
         fi
 
         ${_seedcmd} -output "${VM_DS_PATH}/${_name}/seed.iso" -volid cidata -joliet -rock \
             "${VM_DS_PATH}/${_name}/.cloud-init" >/dev/null 2>&1 \
-            || util::err "Can't write seed.iso for cloud-init"
+            || util_err "Can't write seed.iso for cloud-init"
 
-        util::log "guest" "${_name}" "created ${VM_DS_PATH}/${_name}/seed.iso for cloud-init"
+        util_log "guest" "${_name}" "created ${VM_DS_PATH}/${_name}/seed.iso for cloud-init"
     fi
 
-    config::load "${VM_DS_PATH}/${_name}/${_name}.conf"
-    config::get "_memory" "memory"
-    config::get "_loader" "loader"
-    config::get "_bootdisk" "disk0_name"
-    config::get "_bootdisk_dev" "disk0_dev" "file"
-    config::get "_comports" "comports" "com1"
-    config::get "_uuid" "uuid"
-    config::get "_debug" "debug" "no"
-    config::get "_bhyve_options" "bhyve_options"
-    config::get "_qemu_options" "qemu_options"
+    config_load "${VM_DS_PATH}/${_name}/${_name}.conf"
+    config_get "_memory" "memory"
+    config_get "_loader" "loader"
+    config_get "_bootdisk" "disk0_name"
+    config_get "_bootdisk_dev" "disk0_dev" "file"
+    config_get "_comports" "comports" "com1"
+    config_get "_uuid" "uuid"
+    config_get "_debug" "debug" "no"
+    config_get "_bhyve_options" "bhyve_options"
+    config_get "_qemu_options" "qemu_options"
 
     # bhyve_options is bhyve CLI syntax and would almost certainly be wrong
     # for qemu - warn rather than silently drop it or silently apply garbage
     [ -n "${_bhyve_options}" ] && \
-        util::log "guest" "${_name}" "warning; 'bhyve_options' is ignored under Linux/QEMU - set 'qemu_options' instead"
+        util_log "guest" "${_name}" "warning; 'bhyve_options' is ignored under Linux/QEMU - set 'qemu_options' instead"
 
     # generate a uuid if we don't have one already
     if [ -z "${_uuid}" ]; then
         _uuid=$(uuidgen)
-        config::set "${_name}" "uuid" "${_uuid}"
+        config_set "${_name}" "uuid" "${_uuid}"
     fi
 
     # get cpu topology
-    vm::__cpu "_cpu"
+    vm___cpu "_cpu"
 
-    util::log_rotate "guest" "${_name}"
-    util::log "guest" "${_name}" \
+    util_log_rotate "guest" "${_name}"
+    util_log "guest" "${_name}" \
       "initialising" \
       " [loader: ${_loader}]" \
       " [cpu: ${_cpu}]" \
@@ -132,7 +132,7 @@ vm::run(){
 
     # check basic settings
     if [ -z "${_loader}" -o -z "${_cpu}" -o -z "${_memory}" ]; then
-        util::log "guest" "${_name}" "fatal; unable to start - missing required configuration"
+        util_log "guest" "${_name}" "fatal; unable to start - missing required configuration"
         exit 15
     fi
 
@@ -141,69 +141,72 @@ vm::run(){
     if [ -r /dev/kvm ] && [ -w /dev/kvm ]; then
         _accel="kvm"
     else
-        util::log "guest" "${_name}" "warning; /dev/kvm not accessible, falling back to tcg (software emulation, much slower)"
+        util_log "guest" "${_name}" "warning; /dev/kvm not accessible, falling back to tcg (software emulation, much slower)"
         _accel="tcg"
     fi
 
     # base machine/cpu/memory. -nodefaults so we control every device
     # ourselves rather than accepting whatever qemu would add by default
-    _opts="-machine q35,accel=${_accel} -cpu max -smp ${_cpu} -m ${_memory} -nodefaults"
+    # -display none: without it qemu tries to open a gtk/sdl window and
+    # aborts on a headless host. VNC (see vm_qemu_device_fbuf) is added
+    # separately and still works alongside it.
+    _opts="-machine q35,accel=${_accel} -cpu max -smp ${_cpu} -m ${_memory} -nodefaults -display none"
     [ -n "${_uuid}" ] && _opts="${_opts} -uuid ${_uuid}"
 
-    if config::yesno "utctime" yes; then
+    if config_yesno "utctime" yes; then
         _opts="${_opts} -rtc base=utc"
     else
         _opts="${_opts} -rtc base=localtime"
     fi
 
     # wired/locked memory - relevant for passthrough DMA reliability
-    config::yesno "wired_memory" && _opts="${_opts} -overcommit mem-lock=on"
+    config_yesno "wired_memory" && _opts="${_opts} -overcommit mem-lock=on"
 
     # if uefi, make sure we have firmware, then update options for uefi support
     if [ "${_loader%-*}" = "uefi" ]; then
-        vm::uefi
+        vm_uefi
     fi
 
     # add any custom qemu options
     [ -n "${_qemu_options}" ] && _opts="${_opts} ${_qemu_options}"
 
     # if we have passthru, check iommu support now and exit if not available
-    config::get "_passdev" "passthru0"
+    config_get "_passdev" "passthru0"
 
     if [ -n "${_passdev}" ] && [ ! -d /sys/kernel/iommu_groups ] ; then
-        util::log "guest" "${_name}" "fatal; pci passthrough not supported on this system (no IOMMU groups - check IOMMU/VT-d/AMD-Vi is enabled in firmware and on the kernel command line)"
+        util_log "guest" "${_name}" "fatal; pci passthrough not supported on this system (no IOMMU groups - check IOMMU/VT-d/AMD-Vi is enabled in firmware and on the kernel command line)"
         exit 15
     fi
     if [ -n "${_passdev}" ] && [ -z "$(ls -A /sys/kernel/iommu_groups 2>/dev/null)" ]; then
-        util::log "guest" "${_name}" "fatal; pci passthrough not supported on this system (no IOMMU groups - check IOMMU/VT-d/AMD-Vi is enabled in firmware and on the kernel command line)"
+        util_log "guest" "${_name}" "fatal; pci passthrough not supported on this system (no IOMMU groups - check IOMMU/VT-d/AMD-Vi is enabled in firmware and on the kernel command line)"
         exit 15
     fi
 
     # send qemu's stderr to qemu.log if debug=yes
-    util::yesno "${_debug}" && _logpath="${VM_DS_PATH}/${_name}/qemu.log"
+    util_yesno "${_debug}" && _logpath="${VM_DS_PATH}/${_name}/qemu.log"
 
     # complete the boot disk path (informational logging only, see above)
-    [ -n "${_bootdisk}" ] && vm::get_disk_path "_bootdisk" "${_name}" "${_bootdisk}" "${_bootdisk_dev}"
+    [ -n "${_bootdisk}" ] && vm_get_disk_path "_bootdisk" "${_name}" "${_bootdisk}" "${_bootdisk_dev}"
 
     # build qemu device string
-    vm::qemu_device_comports
-    vm::qemu_device_disks
-    vm::qemu_device_networking
-    vm::qemu_device_rand
-    vm::qemu_device_passthru
-    vm::qemu_device_fbuf
-    vm::qemu_device_mouse
-    vm::qemu_device_sound
-    vm::qemu_device_console
+    vm_qemu_device_comports
+    vm_qemu_device_disks
+    vm_qemu_device_networking
+    vm_qemu_device_rand
+    vm_qemu_device_passthru
+    vm_qemu_device_fbuf
+    vm_qemu_device_mouse
+    vm_qemu_device_sound
+    vm_qemu_device_console
 
-    vm::lock
-    util::log "guest" "${_name}" "booting"
+    vm_lock
+    util_log "guest" "${_name}" "booting"
     cd /
 
     while true; do
 
         # run any prestart script while guest is fully down
-        vm::prestart
+        vm_prestart
 
         # add install iso or disk image.
         # -boot once=d boots this once, then falls through to the normal
@@ -227,19 +230,19 @@ vm::run(){
         #
 
         # resume if saved vm state found
-        if vm::has_saved_state "${_name}"; then
-            util::log "guest" "${_name}" "saved vm state found, resuming"
+        if vm_has_saved_state "${_name}"; then
+            util_log "guest" "${_name}" "saved vm state found, resuming"
             _opts="${_opts} -incoming file:${VM_DS_PATH}/${_name}/${_name}.save"
         fi
 
-        util::log "guest" "${_name}" " [qemu options: ${_opts}]" \
+        util_log "guest" "${_name}" " [qemu options: ${_opts}]" \
           " [qemu devices: ${_devices}]" \
           " [qemu console: ${_comstring}]"
-        [ -n "${_iso_dev}" ] && util::log "guest" "${_name}" " [qemu install device: ${_iso_dev}]"
-        util::log "guest" "${_name}" "starting qemu (run ${_run})"
+        [ -n "${_iso_dev}" ] && util_log "guest" "${_name}" " [qemu install device: ${_iso_dev}]"
+        util_log "guest" "${_name}" "starting qemu (run ${_run})"
 
         # call rctl now as next line will block until qemu exits
-        rctl::set &
+        rctl_set &
 
         # actually run qemu!
         # we're already in the background so we just wait for it to exit
@@ -257,7 +260,7 @@ vm::run(){
 
         # get qemu exit code
         _exit=$?
-        util::log "guest" "${_name}" "qemu exited with status ${_exit}"
+        util_log "guest" "${_name}" "qemu exited with status ${_exit}"
 
         # remove any console sockets
         rm -f ${VM_DS_PATH}/${_name}/vtcon.* >/dev/null 2>&1
@@ -267,10 +270,10 @@ vm::run(){
         [ -f "${VM_DS_PATH}/${_name}/suspending.lock" ] && break
 
         # decide what to do with exit code
-        vm::handle_exit "_action" ${_exit}
+        vm_handle_exit "_action" ${_exit}
         [ "${_action}" != "restart" ] && break
 
-        util::log "guest" "${_name}" "restarting"
+        util_log "guest" "${_name}" "restarting"
 
         # remove install iso so guest reboots from disk if this was an
         # explicit 'vm restart' during an install
@@ -280,24 +283,24 @@ vm::run(){
 
     # destroy taps
     for _tap in ${_taplist}; do
-        util::log "guest" "${_name}" "destroying network device ${_tap}"
+        util_log "guest" "${_name}" "destroying network device ${_tap}"
         ip link delete "${_tap}" >/dev/null 2>&1
     done
 
     if [ -e "${VM_DS_PATH}/${_name}/suspending.lock" ]; then
-        util::log "guest" "${_name}" "suspended"
+        util_log "guest" "${_name}" "suspended"
     else
-        util::log "guest" "${_name}" "stopped"
+        util_log "guest" "${_name}" "stopped"
     fi
 
     # belt-and-suspenders: make sure nothing is left running under this pid
-    _pid=$(vm::getpid "${_name}")
+    _pid=$(vm_getpid "${_name}")
     if [ -n "${_pid}" ] && kill -0 "${_pid}" 2>/dev/null; then
         kill -KILL "${_pid}" >/dev/null 2>&1
     fi
     rm -f "${VM_DS_PATH}/${_name}/${_name}.pid" "${VM_DS_PATH}/${_name}/${_name}.qmp" >/dev/null 2>&1
 
-    vm::unlock
+    vm_unlock
     exit ${_exit}
 }
 
@@ -316,28 +319,47 @@ vm::run(){
 #
 # @modifies _opts _uefi
 #
-vm::uefi(){
-    local _bootrom="/usr/share/OVMF/OVMF_CODE.fd"
-    local _vars_template="/usr/share/OVMF/OVMF_VARS.fd"
+vm_uefi(){
+    local _bootrom="" _vars_template="" _dir
+
+    # The OVMF path is distribution-specific, so search the known
+    # locations instead of hardcoding Debian's. $vm_ovmf_dir in
+    # /etc/vm-bhyve.conf overrides the search.
+    for _dir in ${vm_ovmf_dir} /usr/share/OVMF /usr/share/edk2/ovmf \
+                /usr/share/edk2-ovmf/x64 /usr/share/qemu/ovmf \
+                /usr/share/edk2-ovmf; do
+        if [ -e "${_dir}/OVMF_CODE.fd" ]; then
+            _bootrom="${_dir}/OVMF_CODE.fd"
+            _vars_template="${_dir}/OVMF_VARS.fd"
+            break
+        elif [ -e "${_dir}/OVMF_CODE.4m.fd" ]; then
+            _bootrom="${_dir}/OVMF_CODE.4m.fd"
+            _vars_template="${_dir}/OVMF_VARS.4m.fd"
+            break
+        fi
+    done
+
+    : ${_bootrom:=/usr/share/OVMF/OVMF_CODE.fd}
+    : ${_vars_template:=/usr/share/OVMF/OVMF_VARS.fd}
 
     case "${_loader}" in
         uefi-custom)
             _bootrom="${VM_DS_PATH}/.config/OVMF_CODE.fd"
             ;;
         uefi-csm|uefi-devel)
-            util::log "guest" "${_name}" "warning; '${_loader}' has no direct OVMF equivalent on Linux, using standard OVMF firmware instead"
+            util_log "guest" "${_name}" "warning; '${_loader}' has no direct OVMF equivalent on Linux, using standard OVMF firmware instead"
             ;;
     esac
 
     if [ ! -e "${_bootrom}" ]; then
-        util::log "guest" "${_name}" "fatal; unable to locate firmware ${_bootrom}"
+        util_log "guest" "${_name}" "fatal; unable to locate firmware ${_bootrom}"
         exit 15
     fi
 
     _opts="${_opts} -drive if=pflash,format=raw,readonly=on,file=${_bootrom}"
 
     # should we store uefi vars?
-    if config::yesno "uefi_vars"; then
+    if config_yesno "uefi_vars"; then
 
         # do we already have a storage file for this guest?
         if [ -e "${VM_DS_PATH}/${_name}/uefi-vars.fd" ]; then
@@ -345,7 +367,7 @@ vm::uefi(){
         elif [ -e "${_vars_template}" ]; then
             cp "${_vars_template}" "${VM_DS_PATH}/${_name}/uefi-vars.fd"
         else
-            util::log "guest" "${_name}" "fatal; unable to locate UEFI vars template ${_vars_template}"
+            util_log "guest" "${_name}" "fatal; unable to locate UEFI vars template ${_vars_template}"
             exit 15
         fi
 
@@ -366,12 +388,12 @@ vm::uefi(){
 # signal), or it crashed (nonzero). There's no "the guest wants to reboot"
 # exit code to catch anymore, so on_restart has nothing left to control -
 # the only remaining restart trigger is the explicit marker file that
-# core::restart drops before stopping the guest.
+# core_restart drops before stopping the guest.
 #
 # @param string _var variable to put action into
 # @param int _code qemu exit code
 #
-vm::handle_exit(){
+vm_handle_exit(){
     local _var="$1"
     local _code="$2"
 
@@ -381,7 +403,7 @@ vm::handle_exit(){
     elif [ "${_code}" = "0" ]; then
         setvar "${_var}" "shutdown"
     else
-        config::get "${_var}" "on_fault" "shutdown"
+        config_get "${_var}" "on_fault" "shutdown"
     fi
 }
 
@@ -391,7 +413,7 @@ vm::handle_exit(){
 #
 # @param string - the name of the guest to lock
 #
-vm::lock(){
+vm_lock(){
     hostname > "${VM_DS_PATH}/${_name}/run.lock"
 }
 
@@ -399,7 +421,7 @@ vm::lock(){
 #
 # @param string - the name of the guest to unlock
 #
-vm::unlock(){
+vm_unlock(){
     unlink "${VM_DS_PATH}/${_name}/run.lock" >/dev/null 2>&1
     unlink "${VM_DS_PATH}/${_name}/suspending.lock" >/dev/null 2>&1
     unlink "${VM_DS_PATH}/${_name}/console" >/dev/null 2>&1
@@ -408,13 +430,13 @@ vm::unlock(){
 # create the qemu chardev/device string for guest com ports.
 #
 # Linux: no nmdm here - each com port becomes a unix socket chardev.
-# core::console (vm-core.sh) already expects to find that socket path in
+# core_console (vm-core.sh) already expects to find that socket path in
 # $vm_dir/{guest}/console and connect to it with socat, so the format
 # written to that file ("port=path") must stay exactly as it is.
 #
 # @modifies _comstring
 #
-vm::qemu_device_comports(){
+vm_qemu_device_comports(){
     local _port _num=1 _tmux_name _port_name
 
     unlink "${VM_DS_PATH}/${_name}/console" >/dev/null 2>&1
@@ -455,18 +477,18 @@ vm::qemu_device_comports(){
 #
 # @modifies _devices
 #
-vm::qemu_device_disks(){
+vm_qemu_device_disks(){
     local _disk _type _dev _path _opts _num=0
 
     while true; do
-        config::get "_disk" "disk${_num}_name"
-        config::get "_type" "disk${_num}_type"
+        config_get "_disk" "disk${_num}_name"
+        config_get "_type" "disk${_num}_type"
         [ -z "${_disk}" -o -z "${_type}" ] && break
 
-        config::get "_dev" "disk${_num}_dev"
-        config::get "_opts" "disk${_num}_opts"
+        config_get "_dev" "disk${_num}_dev"
+        config_get "_opts" "disk${_num}_opts"
 
-        vm::get_disk_path "_path" "${_name}" "${_disk}" "${_dev}"
+        vm_get_disk_path "_path" "${_name}" "${_disk}" "${_dev}"
 
         case "${_type}" in
             ahci-hd)
@@ -485,7 +507,7 @@ vm::qemu_device_disks(){
                 ;;
             virtio-blk|*)
                 [ "${_type}" != "virtio-blk" ] && \
-                    util::log "guest" "${_name}" "warning; unrecognised disk type '${_type}' for disk${_num}, defaulting to virtio-blk"
+                    util_log "guest" "${_name}" "warning; unrecognised disk type '${_type}' for disk${_num}, defaulting to virtio-blk"
                 _devices="${_devices} -drive id=disk${_num},file=${_path},format=raw,if=none,cache=writeback,discard=unmap"
                 _devices="${_devices} -device virtio-blk-pci,drive=disk${_num}${_opts:+,${_opts}}"
                 ;;
@@ -497,20 +519,20 @@ vm::qemu_device_disks(){
 
 # get qemu device string for networking.
 # actual tap creation/tagging and building the -netdev/-device args for
-# each interface is switch::provision's job (delegates to
-# switch::standard::provision et al, in the not-yet-ported vm-switch-*
+# each interface is switch_provision's job (delegates to
+# switch_standard_provision et al, in the not-yet-ported vm-switch-*
 # files) - this just drives the loop, same as the original.
 #
-# @modifies _taplist (populated by switch::provision)
+# @modifies _taplist (populated by switch_provision)
 #
-vm::qemu_device_networking(){
+vm_qemu_device_networking(){
     local _emulation _num=0
 
     while true; do
-        config::get "_emulation" "network${_num}_type"
+        config_get "_emulation" "network${_num}_type"
         [ -z "${_emulation}" ] && break
 
-        switch::provision
+        switch_provision
         _num=$((_num + 1))
     done
 }
@@ -519,8 +541,8 @@ vm::qemu_device_networking(){
 #
 # @modifies _devices
 #
-vm::qemu_device_rand(){
-    if config::yesno "virt_random"; then
+vm_qemu_device_rand(){
+    if config_yesno "virt_random"; then
         _devices="${_devices} -object rng-random,id=rng0,filename=/dev/urandom -device virtio-rng-pci,rng=rng0"
     fi
 }
@@ -537,33 +559,33 @@ vm::qemu_device_rand(){
 #
 # @modifies _devices
 #
-vm::qemu_device_fbuf(){
+vm_qemu_device_fbuf(){
     local _port _listen _res _pass _vga _wait _display
 
     # only works in uefi mode (matches the original - fbuf needs a real
     # graphics-capable firmware path)
     [ -z "${_uefi}" ] && return 0
 
-    ! config::yesno "graphics" && return 0
+    ! config_yesno "graphics" && return 0
 
-    config::get "_port" "graphics_port"
-    config::get "_listen" "graphics_listen"
-    config::get "_res" "graphics_res"
-    config::get "_vga" "graphics_vga"
-    config::get "_pass" "vnc_password"
-    config::get "_wait" "graphics_wait" "auto"
+    config_get "_port" "graphics_port"
+    config_get "_listen" "graphics_listen"
+    config_get "_res" "graphics_res"
+    config_get "_vga" "graphics_vga"
+    config_get "_pass" "vnc_password"
+    config_get "_wait" "graphics_wait" "auto"
 
     [ "${_wait}" = "auto" -a -z "${_iso}" ] && _wait="no"
 
     if [ -z "${_port}" ]; then
-        vm::find_available_net_port "_port" "5900"
+        vm_find_available_net_port "_port" "5900"
 
         if [ -z "${_port}" ]; then
-            util::log "guest" "${_name}" "warning; unable to allocate a network port for graphics/vnc"
+            util_log "guest" "${_name}" "warning; unable to allocate a network port for graphics/vnc"
             return 1
         fi
 
-        util::log "guest" "${_name}" "dynamically allocated port ${_port} for vnc connections"
+        util_log "guest" "${_name}" "dynamically allocated port ${_port} for vnc connections"
     fi
 
     # qemu's -vnc takes a display number, not a raw port (port = 5900 + display)
@@ -579,9 +601,9 @@ vm::qemu_device_fbuf(){
     _devices="${_devices} -device ${_vga:-VGA}"
 
     [ -n "${_res}" ] && \
-        util::log "guest" "${_name}" "warning; graphics_res has no qemu equivalent - set the resolution from inside the guest"
+        util_log "guest" "${_name}" "warning; graphics_res has no qemu equivalent - set the resolution from inside the guest"
 
-    util::yesno "${_wait}" && _opts="${_opts} -S"
+    util_yesno "${_wait}" && _opts="${_opts} -S"
 
     # write vnc port to console data
     echo "vnc=${_listen:-0.0.0.0}:${_port}" >> "${VM_DS_PATH}/${_name}/console"
@@ -591,8 +613,8 @@ vm::qemu_device_fbuf(){
 #
 # @modifies _devices
 #
-vm::qemu_device_mouse(){
-    if config::yesno "xhci_mouse"; then
+vm_qemu_device_mouse(){
+    if config_yesno "xhci_mouse"; then
         _devices="${_devices} -device qemu-xhci,id=xhci0 -device usb-tablet,bus=xhci0.0"
     fi
 }
@@ -605,8 +627,8 @@ vm::qemu_device_mouse(){
 #
 # @modifies _devices
 #
-vm::qemu_device_sound(){
-    if config::yesno "sound"; then
+vm_qemu_device_sound(){
+    if config_yesno "sound"; then
         _devices="${_devices} -audiodev pipewire,id=snd0 -device ich9-intel-hda -device hda-duplex,audiodev=snd0"
     fi
 }
@@ -614,15 +636,15 @@ vm::qemu_device_sound(){
 # add virtio-console devices to the guest
 #
 # Linux: each named port becomes a unix socket chardev at the same
-# $vm_dir/{guest}/vtcon.<port> path the original used - info::guest_vtcon
+# $vm_dir/{guest}/vtcon.<port> path the original used - info_guest_vtcon
 # (vm-info.sh) already expects that exact path, so it's kept as-is.
 #
 # @modifies _devices
 #
-vm::qemu_device_console(){
+vm_qemu_device_console(){
     local _console _curr=0 _portpath
 
-    config::get "_console" "virt_console0"
+    config_get "_console" "virt_console0"
     [ -z "${_console}" ] && return 0
 
     _devices="${_devices} -device virtio-serial-pci,id=vioserial0"
@@ -640,7 +662,7 @@ vm::qemu_device_console(){
         _devices="${_devices} -device virtserialport,chardev=vtcon${_curr},bus=vioserial0.0,name=${_console}"
 
         _curr=$((_curr + 1))
-        config::get "_console" "virt_console${_curr}"
+        config_get "_console" "virt_console${_curr}"
     done
 }
 
@@ -654,12 +676,12 @@ vm::qemu_device_console(){
 #
 # @modifies _devices _opts
 #
-vm::qemu_device_passthru(){
+vm_qemu_device_passthru(){
     local _dev _options _num=0
 
     while true; do
-        config::get "_dev" "passthru${_num}"
-        config::get "_options" "passthru${_num}_options"
+        config_get "_dev" "passthru${_num}"
+        config_get "_options" "passthru${_num}_options"
         [ -z "${_dev}" ] && break
 
         _devices="${_devices} -device vfio-pci,host=${_dev}${_options:+,${_options}}"
@@ -681,14 +703,14 @@ vm::qemu_device_passthru(){
 # unchanged from the original - none of this is FreeBSD-specific. zvol
 # paths (/dev/zvol/<dataset>) are identical under OpenZFS on Linux, and
 # the iscsi/custom/default cases just build a path or delegate elsewhere
-# (see info::__find_iscsi in vm-info.sh for the Linux iscsi lookup).
+# (see info___find_iscsi in vm-info.sh for the Linux iscsi lookup).
 #
 # @param string _var variable to put disk path into
 # @param string _name the name of the guest
 # @param string _disk the name of the disk
 # @param string _disk_dev=file|zvol|sparse-zvol|custom type of device
 #
-vm::get_disk_path(){
+vm_get_disk_path(){
     local _var="$1"
     local _name="$2"
     local _disk="$3"
@@ -698,7 +720,7 @@ vm::get_disk_path(){
         zvol)        ;&
         sparse-zvol) setvar "${_var}" "/dev/zvol/${VM_DS_ZFS_DATASET}/${_name}/${_disk}" ;;
         custom|9p)   setvar "${_var}" "${_disk}" ;;
-        iscsi)       info::__find_iscsi "${_var}" "${_disk}" ;;
+        iscsi)       info___find_iscsi "${_var}" "${_disk}" ;;
         *)           setvar "${_var}" "${VM_DS_PATH}/${_name}/${_disk}" ;;
     esac
 }
@@ -710,15 +732,15 @@ vm::get_disk_path(){
 #
 # unchanged - just runs an external script, nothing FreeBSD-specific
 #
-vm::prestart(){
+vm_prestart(){
     local _script
 
-    config::get "_script" "prestart" || return 0
+    config_get "_script" "prestart" || return 0
     echo "${_script}" | grep -qs '^/'
     [ $? -ne 0 ] && _script="${VM_DS_PATH}/${_name}/${_script}"
     [ ! -x "${_script}" ] && return 1
 
-    util::log "guest" "${_name}" "running prestart script ${_script} ${_name} ${VM_DS_ZFS_DATASET}/${_name}"
+    util_log "guest" "${_name}" "running prestart script ${_script} ${_name} ${VM_DS_ZFS_DATASET}/${_name}"
 
     (
       cd "${VM_DS_PATH}/${_name}"
@@ -732,13 +754,13 @@ vm::prestart(){
 #
 # Linux/QEMU: there's no separate bootloader phase (bhyveload/grub-bhyve) -
 # qemu boots guests directly, so there's nothing for VM_RUN_LOAD to hold;
-# it's kept (always empty) purely so vm::running_check doesn't need
+# it's kept (always empty) purely so vm_running_check doesn't need
 # touching. Guest identity comes from the qemu process's "-name" argument,
-# same convention core::stopall (vm-core.sh) already relies on.
+# same convention core_stopall (vm-core.sh) already relies on.
 #
 # @modifies VM_RUN_BHYVE VM_RUN_LOAD
 #
-vm::running_load(){
+vm_running_load(){
     VM_RUN_BHYVE=$(
         ps -eo pid=,args= | \
         sed -n 's/^[[:space:]]*\([0-9][0-9]*\)[[:space:]].*-name[[:space:]]\+\([^,[:space:]]*\).*/\1 \2/p'
@@ -748,7 +770,7 @@ vm::running_load(){
 
 # see if a specific virtual machine is running
 # we search VM_RUN_BHYVE (and, for original-behaviour compatibility,
-# VM_RUN_LOAD, which is always empty here - see vm::running_load) looking
+# VM_RUN_LOAD, which is always empty here - see vm_running_load) looking
 # for the specified guest. If found we output "Running" along with the
 # PID; if not running we output "Suspended" or "Stopped"
 #
@@ -756,7 +778,7 @@ vm::running_load(){
 # @param string _name name of the guest to look for
 # @return success if running
 #
-vm::running_check(){
+vm_running_check(){
     local _var="$1"
     local _var2="$2"
     local _name="$3"
@@ -771,9 +793,9 @@ vm::running_check(){
         fi
     done
 
-    datastore::get_guest "${_name}"
+    datastore_get_guest "${_name}"
 
-    if vm::has_saved_state "${_name}"; then
+    if vm_has_saved_state "${_name}"; then
         setvar "${_var}" "Suspended"
     else
         setvar "${_var}" "Stopped"
@@ -786,14 +808,14 @@ vm::running_check(){
 # display warning if it is. up to caller to decide whether to continue.
 #
 # Linux/QEMU: no /dev/vmm to check - "running locally" now means a live
-# pid in the guest's .pid file, same source of truth core::stop/core::console
+# pid in the guest's .pid file, same source of truth core_stop/core_console
 # (vm-core.sh) already use.
 #
 # @param string _name the guest name
 # @param int _skip_lock skip local lock file if guest isn't actually running
 # @return success if not running
 #
-vm::confirm_stopped(){
+vm_confirm_stopped(){
     local _name="$1"
     local _skip_lock="$2"
     local _host _our_host _pid
@@ -806,15 +828,15 @@ vm::confirm_stopped(){
         _host=$(head -n 1 "${VM_DS_PATH}/${_name}/run.lock")
 
         if [ "${_host}" != "${_our_host}" -o "${_skip_lock}" != "1" ]; then
-            util::warn "${_name} appears to be running on ${_host} (locked)"
+            util_warn "${_name} appears to be running on ${_host} (locked)"
             return 2
         fi
     fi
 
     # check local machine, just in case guest run manually
-    _pid=$(vm::getpid "${_name}")
+    _pid=$(vm_getpid "${_name}")
     if [ -n "${_pid}" ] && kill -0 "${_pid}" 2>/dev/null; then
-        util::warn "${_name} appears to be running locally (pid ${_pid})"
+        util_warn "${_name} appears to be running locally (pid ${_pid})"
         return 1
     fi
 
@@ -829,7 +851,7 @@ vm::confirm_stopped(){
 # @param string _name the guest name
 # @return success if the guest has saved state
 #
-vm::has_saved_state(){
+vm_has_saved_state(){
     local _name="$1"
 
     [ -e "${VM_DS_PATH}/${_name}/${_name}.save" ]
@@ -843,7 +865,7 @@ vm::has_saved_state(){
 # networks use), so guests are recognisable as qemu VMs and won't collide
 # with anything using the bhyve range.
 #
-vm::generate_static_mac(){
+vm_generate_static_mac(){
     local _dev_id=""
 
     while [ -z "${_dev_id}" -o "${_dev_id}" = "00:00:00" ]; do
@@ -852,8 +874,8 @@ vm::generate_static_mac(){
 
     _mac="52:54:00:${_dev_id}"
 
-    util::log "guest" "${_name}" "generated static mac ${_mac}"
-    config::set "${_name}" "network${_num}_mac" "${_mac}"
+    util_log "guest" "${_name}" "generated static mac ${_mac}"
+    config_set "${_name}" "network${_num}_mac" "${_mac}"
 }
 
 # try to find an available network port to listen on
@@ -867,7 +889,7 @@ vm::generate_static_mac(){
 # @param int _curr the port to start searching from
 # @return true if we found a port
 #
-vm::find_available_net_port(){
+vm_find_available_net_port(){
     local _var="$1"
     local _curr="$2"
     local _open _line _max _used
@@ -904,18 +926,18 @@ vm::find_available_net_port(){
 #
 # @param string _name name of guest to generalise
 #
-vm::generalise(){
+vm_generalise(){
     local _name="$1"
     local _entry _num=0
 
-    config::load "${VM_DS_PATH}/${_name}/${_name}.conf"
-    config::remove "${_name}" "uuid"
+    config_load "${VM_DS_PATH}/${_name}/${_name}.conf"
+    config_remove "${_name}" "uuid"
 
     while true; do
-        config::get "_entry" "network${_num}_mac"
+        config_get "_entry" "network${_num}_mac"
         [ -z "${_entry}" ] && break
 
-        config::remove "${_name}" "network${_num}_mac"
+        config_remove "${_name}" "network${_num}_mac"
         _num=$((_num + 1))
     done
 }
@@ -927,22 +949,22 @@ vm::generalise(){
 # unchanged - qemu's "-smp N,sockets=X,cores=Y,threads=Z" syntax happens
 # to be the same shape as bhyve's "-c N,sockets=X,cores=Y,threads=Z", so
 # this needed no changes at all - just prefix the result with -smp instead
-# of -c where it's used (see vm::run).
+# of -c where it's used (see vm_run).
 #
 # @param string _var variable to put cpu configuration into
 #
-vm::__cpu(){
+vm___cpu(){
     local _var="$1"
     local _c_cpu _c_socket _c_core _c_thread
     local _config
 
-    config::get "_c_cpu" "cpu"
-    [ -n "${_c_cpu}" ] || util::err "fatal; unable to determine cpu count"
+    config_get "_c_cpu" "cpu"
+    [ -n "${_c_cpu}" ] || util_err "fatal; unable to determine cpu count"
     _config="${_c_cpu}"
 
-    config::get "_c_socket" "cpu_sockets"
-    config::get "_c_core" "cpu_cores"
-    config::get "_c_thread" "cpu_threads"
+    config_get "_c_socket" "cpu_sockets"
+    config_get "_c_core" "cpu_cores"
+    config_get "_c_thread" "cpu_threads"
 
     [ -n "${_c_socket}" ] && _config="${_config},sockets=${_c_socket}"
     [ -n "${_c_core}" ] && _config="${_config},cores=${_c_core}"

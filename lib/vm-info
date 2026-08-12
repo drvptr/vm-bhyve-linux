@@ -10,19 +10,19 @@
 # @param string _if interface name
 # @return non-zero if the interface doesn't exist
 #
-info::__net_stats(){
+info___net_stats(){
     local _var="$1"
     local _if="$2"
     local _rx _tx
 
-    [ -d "/sys/class/net/${_if}/statistics" ] || { config::setvar "${_var}" ""; return 1; }
+    [ -d "/sys/class/net/${_if}/statistics" ] || { config_setvar "${_var}" ""; return 1; }
 
     _rx=$(cat "/sys/class/net/${_if}/statistics/rx_bytes" 2>/dev/null)
     _tx=$(cat "/sys/class/net/${_if}/statistics/tx_bytes" 2>/dev/null)
 
-    [ -z "${_rx}" -o -z "${_tx}" ] && { config::setvar "${_var}" ""; return 1; }
+    [ -z "${_rx}" -o -z "${_tx}" ] && { config_setvar "${_var}" ""; return 1; }
 
-    config::setvar "${_var}" "${_rx} ${_tx}"
+    config_setvar "${_var}" "${_rx} ${_tx}"
 }
 
 # find the tap device for one of a guest's network interfaces.
@@ -39,7 +39,7 @@ info::__net_stats(){
 # @param string _gnum interface number
 # @return non-zero if no matching tap is found
 #
-info::__find_tap(){
+info___find_tap(){
     local _var_id="$1"
     local _var_tag="$2"
     local _gname="$3"
@@ -53,15 +53,15 @@ info::__find_tap(){
         case "${_alias}" in
             "vmnet/${_gname}/${_gnum}/"*)
                 _if=$(basename "$(dirname "${_f}")")
-                config::setvar "${_var_id}" "${_if}"
-                config::setvar "${_var_tag}" "${_alias}"
+                config_setvar "${_var_id}" "${_if}"
+                config_setvar "${_var_tag}" "${_alias}"
                 return 0
                 ;;
         esac
     done
 
-    config::setvar "${_var_id}" ""
-    config::setvar "${_var_tag}" ""
+    config_setvar "${_var_id}" ""
+    config_setvar "${_var_tag}" ""
     return 1
 }
 
@@ -70,22 +70,22 @@ info::__find_tap(){
 #
 # @param optional string[multiple] _name name of the guest to display
 #
-info::guest(){
+info_guest(){
     local _name="$1"
     # Linux: enumerate every bridge on the system rather than a FreeBSD
-    # interface "group" (Linux has no such concept). info::__find_bridge
+    # interface "group" (Linux has no such concept). info___find_bridge
     # only uses this to check bridge *membership* of a specific tap, so
     # a superset of bridges here is harmless.
     local _bridge_list=$(ip -o link show type bridge | awk -F': ' '{print $2}')
     local _ds
 
-    vm::running_load
+    vm_running_load
 
     # see if guest name(s) provided
     if [ -n "${_name}" ]; then
         while [ -n "${_name}" ]; do
-            datastore::get_guest "${_name}" || util::err "unable to locate virtual machine '${_name}'"
-            info::guest_show "${_name}"
+            datastore_get_guest "${_name}" || util_err "unable to locate virtual machine '${_name}'"
+            info_guest_show "${_name}"
 
             shift
             _name="$1"
@@ -96,11 +96,11 @@ info::guest(){
 
     # show all guests from all datastores
     for _ds in ${VM_DATASTORE_LIST}; do
-        datastore::get "${_ds}" || continue
+        datastore_get "${_ds}" || continue
 
         ls -1 "${VM_DS_PATH}" 2>/dev/null | \
         while read _name; do
-            [ -e "${VM_DS_PATH}/${_name}/${_name}.conf" ] && info::guest_show "${_name}"
+            [ -e "${VM_DS_PATH}/${_name}/${_name}.conf" ] && info_guest_show "${_name}"
         done
     done
 }
@@ -110,18 +110,18 @@ info::guest(){
 #
 # @param optional string[multiple] _switch name of switch to display
 #
-info::switch(){
+info_switch(){
     local _switch="$1"
     local _list
 
     # load config file manually using non-core function
     # this means we can share the config_output function with guest
-    config::load "${vm_dir}/.config/system.conf"
-    config::get "_list" "switch_list"
+    config_load "${vm_dir}/.config/system.conf"
+    config_get "_list" "switch_list"
 
     if [ -n "${_switch}" ]; then
         while [ -n "${_switch}" ]; do
-            info::switch_show "${_switch}"
+            info_switch_show "${_switch}"
 
             shift
             _switch="$1"
@@ -131,7 +131,7 @@ info::switch(){
     fi
 
     for _switch in ${_list}; do
-        info::switch_show "${_switch}"
+        info_switch_show "${_switch}"
     done
 }
 
@@ -139,17 +139,17 @@ info::switch(){
 #
 # @param string _switch the name of the switch
 #
-info::switch_show(){
+info_switch_show(){
     local _switch="$1"
     local _type _bridge _vale _netgraph _id
     local _INDENT="  "
 
     [ -z "${_switch}" ] && return 1
 
-    config::get "_type" "type_${_switch}" "standard"
-    config::get "_bridge" "bridge_${_switch}"
-    config::get "_vale" "vale_${_switch}"
-    config::get "_netgraph" "netgraph_${_switch}"
+    config_get "_type" "type_${_switch}" "standard"
+    config_get "_bridge" "bridge_${_switch}"
+    config_get "_vale" "vale_${_switch}"
+    config_get "_netgraph" "netgraph_${_switch}"
 
 
     echo "------------------------"
@@ -157,27 +157,27 @@ info::switch_show(){
     echo "------------------------"
 
     echo "${_INDENT}type: ${_type}"
-    switch::id "_id" "${_switch}"
+    switch_id "_id" "${_switch}"
 
     # we don't have a bridge for vale and netgraph switches
     [ "${_type}" != "vale" ] && [ "${_type}" != "netgraph" ] && _bridge="${_id}"
 
     echo "${_INDENT}ident: ${_id:--}"
 
-    info::__output_config "vlan_${_switch}" "vlan"
-    info::__output_config "ports_${_switch}" "physical-ports"
+    info___output_config "vlan_${_switch}" "vlan"
+    info___output_config "ports_${_switch}" "physical-ports"
 
     if [ -n "${_bridge}" ]; then
-        if info::__net_stats "_stats" "${_bridge}"; then
-            _b_in=$(info::__bytes_human "${_stats%% *}")
-            _b_out=$(info::__bytes_human "${_stats##* }")
+        if info___net_stats "_stats" "${_bridge}"; then
+            _b_in=$(info___bytes_human "${_stats%% *}")
+            _b_out=$(info___bytes_human "${_stats##* }")
 
             echo "${_INDENT}bytes-in: ${_stats%% *} (${_b_in})"
             echo "${_INDENT}bytes-out: ${_stats##* } (${_b_out})"
         fi
 
         # show guest ports
-        info::switch_ports
+        info_switch_ports
     fi
 
     echo ""
@@ -185,7 +185,7 @@ info::switch_show(){
 
 # get all guest ports for current bridge
 #
-info::switch_ports(){
+info_switch_ports(){
     # Linux: bridge membership lives in sysfs - one entry per member
     # interface under /sys/class/net/<bridge>/brif/. We only show
     # ports that are actually tagged as guest taps (ifalias starting
@@ -214,7 +214,7 @@ info::switch_ports(){
 #
 # @param string _name name of the guest to display
 #
-info::guest_show(){
+info_guest_show(){
     local _name="$1"
     local _conf="${VM_DS_PATH}/${_name}/${_name}.conf"
     local _INDENT="  "
@@ -224,12 +224,12 @@ info::guest_show(){
     [ -z "${_name}" ] && return 1
     [ ! -f "${_conf}" ] && return 1
 
-    config::load "${_conf}"
+    config_load "${_conf}"
 
     # check local and global runstate.
-    # Linux/QEMU: there's no /dev/vmm - vm::running_check already gives
+    # Linux/QEMU: there's no /dev/vmm - vm_running_check already gives
     # us the pid, so "running locally" just means that pid is alive.
-    vm::running_check "_global_run" "_pid" "${_name}"
+    vm_running_check "_global_run" "_pid" "${_name}"
     [ -n "${_pid}" ] && kill -0 "${_pid}" 2>/dev/null && _RUN="1"
     _global_run=$(echo "${_global_run}" | tr '[:upper:]' '[:lower:]')
 
@@ -241,34 +241,34 @@ info::guest_show(){
     echo "${_INDENT}datastore: ${VM_DS_NAME}"
 
     # basic guest configuration
-    info::__output_config "loader" "" "none"
-    info::__output_config "uuid" "" "auto"
-    info::__output_config "cpu"
+    info___output_config "loader" "" "none"
+    info___output_config "uuid" "" "auto"
+    info___output_config "cpu"
 
     # check for a cpu topology
-    config::get "_opt" "cpu_sockets"
+    config_get "_opt" "cpu_sockets"
 
     if [ -n "${_opt}" ]; then
         echo -n "${_INDENT}cpu-topology: sockets=${_opt}"
-        config::get "_opt" "cpu_cores"
+        config_get "_opt" "cpu_cores"
         [ -n "${_opt}" ] && echo -n ", cores=${_opt}"
-        config::get "_opt" "cpu_threads"
+        config_get "_opt" "cpu_threads"
         [ -n "${_opt}" ] && echo -n ", threads=${_opt}"
         echo ""
     fi
 
-    info::__output_config "memory"
+    info___output_config "memory"
 
     # running system details
     if [ "${_RUN}" = "1" ]; then
         # Linux/QEMU: resident memory comes straight from ps(1) instead
         # of bhyvectl --get-stats. ps reports RSS in KB, convert to bytes
-        # to match info::__bytes_human's expected unit.
+        # to match info___bytes_human's expected unit.
         _res_mem=$(ps -o rss= -p "${_pid}" 2>/dev/null | tr -d ' ')
 
         if [ -n "${_res_mem}" ]; then
             _res_mem=$((_res_mem * 1024))
-            _b_res_mem=$(info::__bytes_human "${_res_mem}")
+            _b_res_mem=$(info___bytes_human "${_res_mem}")
             echo "${_INDENT}memory-resident: ${_res_mem} (${_b_res_mem})"
         fi
 
@@ -283,29 +283,29 @@ info::guest_show(){
             done
 
             # virtio-console devices
-            info::guest_vtcon
+            info_guest_vtcon
         fi
     fi
 
     # network interfaces
-    info::guest_networking
+    info_guest_networking
 
     # disks
-    info::guest_disks
+    info_guest_disks
 
     # zfs data
-    info::guest_zfs
+    info_guest_zfs
 
     echo ""
 }
 
 # display any virtio consoles
 #
-info::guest_vtcon(){
+info_guest_vtcon(){
     local _INDENT="    "
     local _console _num=0
 
-    config::get "_console" "virt_console0"
+    config_get "_console" "virt_console0"
     [ -z "${_console}" ] && return 0
 
     echo ""
@@ -319,7 +319,7 @@ info::guest_vtcon(){
         echo "${_INDENT}vtcon${_num}: ${VM_DS_PATH}/${_name}/vtcon.${_console}"
 
         _num=$((_num + 1))
-        config::get "_console" "virt_console${_num}"
+        config_get "_console" "virt_console${_num}"
     done
 }
 
@@ -327,7 +327,7 @@ info::guest_vtcon(){
 #
 # zfs list/get are identical on Linux (OpenZFS) - nothing to change here.
 #
-info::guest_zfs(){
+info_guest_zfs(){
    local _INDENT="    "
    local _data
 
@@ -351,26 +351,26 @@ info::guest_zfs(){
 
 # display disks
 #
-info::guest_disks(){
+info_guest_disks(){
     local _num=0
     local _disk _type _dev _path _size _b_size _used _b_used
     local _INDENT="    "
 
     while true; do
-        config::get "_disk" "disk${_num}_name"
-        config::get "_type" "disk${_num}_type"
-        config::get "_dev" "disk${_num}_dev" "file"
+        config_get "_disk" "disk${_num}_name"
+        config_get "_type" "disk${_num}_type"
+        config_get "_dev" "disk${_num}_dev" "file"
         [ -z "${_disk}" -o -z "${_type}" ] && break
 
-        vm::get_disk_path "_path" "${_name}" "${_disk}" "${_dev}"
+        vm_get_disk_path "_path" "${_name}" "${_disk}" "${_dev}"
 
         echo ""
         echo "  virtual-disk"
         echo "${_INDENT}number: ${_num}"
 
-        info::__output_config "disk${_num}_dev" "device-type" "file"
-        info::__output_config "disk${_num}_type" "emulation"
-        info::__output_config "disk${_num}_opts" "options"
+        info___output_config "disk${_num}_dev" "device-type" "file"
+        info___output_config "disk${_num}_type" "emulation"
+        info___output_config "disk${_num}_opts" "options"
 
         echo "${_INDENT}system-path: ${_path:--}"
 
@@ -404,8 +404,8 @@ info::guest_disks(){
             esac
 
             if [ -n "${_size}" -a -n "${_used}" ]; then
-                _b_size=$(info::__bytes_human "${_size}")
-                _b_used=$(info::__bytes_human "${_used}")
+                _b_size=$(info___bytes_human "${_size}")
+                _b_used=$(info___bytes_human "${_used}")
                 echo "${_INDENT}bytes-size: ${_size} (${_b_size})"
                 echo "${_INDENT}bytes-used: ${_used} (${_b_used})"
             fi
@@ -417,13 +417,13 @@ info::guest_disks(){
 
 # display networking configuration
 #
-info::guest_networking(){
+info_guest_networking(){
     local _num=0
     local _int _id _tag _switch _stats _b_in _b_out _mtu _bridge
     local _INDENT="    "
 
     while true; do
-        config::get "_int" "network${_num}_type"
+        config_get "_int" "network${_num}_type"
         [ -z "${_int}" ] && break
 
         echo ""
@@ -431,17 +431,17 @@ info::guest_networking(){
         echo "${_INDENT}number: ${_num}"
 
         # basic interface config
-        info::__output_config "network${_num}_type" "emulation"
-        info::__output_config "network${_num}_switch" "virtual-switch"
-        info::__output_config "network${_num}_mac" "fixed-mac-address"
-        info::__output_config "network${_num}_device" "fixed-device"
+        info___output_config "network${_num}_type" "emulation"
+        info___output_config "network${_num}_switch" "virtual-switch"
+        info___output_config "network${_num}_mac" "fixed-mac-address"
+        info___output_config "network${_num}_device" "fixed-device"
 
         # if running, try to get some more interface details
         if [ "${_RUN}" = "1" ]; then
-            config::get "_switch" "network${_num}_switch"
+            config_get "_switch" "network${_num}_switch"
 
-            info::__find_tap "_id" "_tag" "${_name}" "${_num}"
-            info::__find_bridge "_bridge" "${_id}"
+            info___find_tap "_id" "_tag" "${_name}" "${_num}"
+            info___find_bridge "_bridge" "${_id}"
 
             _mtu=""
             [ -n "${_id}" ] && _mtu=$(cat "/sys/class/net/${_id}/mtu" 2>/dev/null)
@@ -451,9 +451,9 @@ info::guest_networking(){
             echo "${_INDENT}mtu: ${_mtu:--}"
             echo "${_INDENT}bridge: ${_bridge:--}"
 
-            if [ -n "${_id}" ] && info::__net_stats "_stats" "${_id}"; then
-                _b_in=$(info::__bytes_human "${_stats%% *}")
-                _b_out=$(info::__bytes_human "${_stats##* }")
+            if [ -n "${_id}" ] && info___net_stats "_stats" "${_id}"; then
+                _b_in=$(info___bytes_human "${_stats%% *}")
+                _b_out=$(info___bytes_human "${_stats##* }")
 
                 echo "${_INDENT}bytes-in: ${_stats%% *} (${_b_in})"
                 echo "${_INDENT}bytes-out: ${_stats##* } (${_b_out})"
@@ -471,20 +471,20 @@ info::guest_networking(){
 # @param optional string _title title to display instead of using option name
 # @param optional string _default default value to display if not -
 #
-info::__output_config(){
+info___output_config(){
     local _option="$1"
     local _title="$2"
     local _default="$3"
-    local _var
+    local _vmi_var
 
-    config::get "_var" "${_option}" "${_default:--}"
+    config_get "_vmi_var" "${_option}" "${_default:--}"
     [ -z "${_title}" ] && _title="${_option}"
 
-    echo "${_INDENT}${_title}: ${_var}"
+    echo "${_INDENT}${_title}: ${_vmi_var}"
 }
 
 # try and find the bridge an interface is a member of.
-# we do this rather than just use switch::id as
+# we do this rather than just use switch_id as
 # this should be able to locate the bridge even for devices
 # that have been bridged manually and have no switch name configured
 #
@@ -494,21 +494,21 @@ info::__output_config(){
 # @param string _var variable to put value into
 # @param string _interface interface to look for
 #
-info::__find_bridge(){
+info___find_bridge(){
     local _var="$1"
     local _interface="$2"
     local _br
 
-    [ -z "${_interface}" ] && { config::setvar "${_var}" ""; return 1; }
+    [ -z "${_interface}" ] && { config_setvar "${_var}" ""; return 1; }
 
     for _br in ${_bridge_list}; do
         if [ -e "/sys/class/net/${_br}/brif/${_interface}" ]; then
-            config::setvar "${_var}" "${_br}"
+            config_setvar "${_var}" "${_br}"
             return 0
         fi
     done
 
-    config::setvar "${_var}" ""
+    config_setvar "${_var}" ""
     return 1
 }
 
@@ -520,7 +520,7 @@ info::__find_bridge(){
 #
 # @param int _val the value to convert
 #
-info::__bytes_human(){
+info___bytes_human(){
     local _val="$1" _int _ext
     local _dec="$2"
     local _num="$3"
@@ -560,7 +560,7 @@ info::__bytes_human(){
 # @param string _var variable to put the resolved /dev/sdX path into
 # @param string _target target in "iqn/lun" form (lun defaults to 0)
 #
-info::__find_iscsi() {
+info___find_iscsi() {
     local _var="$1"
     local _target="$2"
     local _lun _iqn _sess _dev
@@ -577,11 +577,11 @@ info::__find_iscsi() {
         _dev=$(find "${_sess}/device" -maxdepth 6 -path "*:${_lun}/block/*" -printf '%f\n' 2>/dev/null | head -n1)
 
         if [ -n "${_dev}" ]; then
-            config::setvar "${_var}" "/dev/${_dev}"
+            config_setvar "${_var}" "/dev/${_dev}"
             return 0
         fi
     done
 
-    config::setvar "${_var}" ""
-    util::err "Unable to locate iSCSI device ${_iqn}/${_lun}"
+    config_setvar "${_var}" ""
+    util_err "Unable to locate iSCSI device ${_iqn}/${_lun}"
 }

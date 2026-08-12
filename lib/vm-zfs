@@ -1,13 +1,14 @@
 #!/bin/sh
 # SPDX-License-Identifier: BSD-2-Clause
 # SPDX-FileCopyrightText: 2016 Matt Churchyard <churchers@gmail.com>
+# SPDX-FileCopyrightText: 2026 Petr Derbyshev <drvpotr@gmail.com>
 
 # set us up for zfs use
 # we need the zfs dataset name for zfs commands, and the file system path
-# for bhyve. It's highly possible these will be different.
+# for qemu. It's highly possible these will be different.
 # We ask user to specify the dataset name as "zfs:pool/dataset"
 # This can then be used for zfs commands, and we can retrieve the mountpoint
-# to find out the file path for bhyve
+# to find out the file path for qemu
 #
 # This then overwrites $vm_dir with the file system path, so that the
 # rest of vm-bhyve can work normally, regardless of whether we are in zfs mode
@@ -19,15 +20,17 @@
 #
 # @modifies VM_ZFS VM_ZFS_DATASET vm_dir
 #
-zfs::init(){
+zfs_init(){
 
     # check for zfs storage location
     # user should specify "zfs:pool/dataset" if they want ZFS support
     if [ "${vm_dir%%:*}" = "zfs" ]; then
 
-        # check zfs running
-        kldstat -qm zfs >/dev/null 2>&1
-        [ $? -eq 0 ] || util::err "ZFS support requested but ZFS not available"
+        # Linux: no kldstat - look for the kernel module and the userland
+        # tools instead
+        if [ ! -d /sys/module/zfs ] && ! command -v zfs >/dev/null 2>&1; then
+            util_err "ZFS support requested but ZFS not available"
+        fi
 
         # global zfs details
         VM_ZFS="1"
@@ -35,8 +38,15 @@ zfs::init(){
 
         # update vm_dir
         # this makes sure it exists, confirms it's mounted & gets correct path in one go
-        vm_dir=$(mount | grep "^${VM_ZFS_DATASET} " |cut -d' ' -f3)
-        [ -z "${vm_dir}" ] && util::err "unable to locate mountpoint for ZFS dataset ${VM_ZFS_DATASET}"
+        #
+        # Linux/FreeBSD: ask zfs directly for the mountpoint rather than
+        # parsing mount(8) output - same command either platform, and it
+        # correctly reports "not mounted" for legacy/none mountpoints
+        # instead of just finding nothing.
+        vm_dir=$(zfs list -H -o mountpoint "${VM_ZFS_DATASET}" 2>/dev/null)
+        case "${vm_dir}" in
+            ""|none|legacy) util_err "unable to locate mountpoint for ZFS dataset ${VM_ZFS_DATASET}" ;;
+        esac
     fi
 }
 
@@ -45,14 +55,14 @@ zfs::init(){
 #
 # @param string _name name of the dataset to create
 #
-zfs::make_dataset(){
+zfs_make_dataset(){
     local _name="$1"
     local _opts="$2"
 
     if [ -n "${_name}" -a "${VM_DS_ZFS}" = "1" ]; then
-        zfs::__format_options "_opts" "${_opts}"
+        zfs___format_options "_opts" "${_opts}"
         zfs create ${_opts} "${_name}"
-        [ $? -eq 0 ] || util::err "failed to create new ZFS dataset ${_name}"
+        [ $? -eq 0 ] || util_err "failed to create new ZFS dataset ${_name}"
     fi
 }
 
@@ -60,12 +70,12 @@ zfs::make_dataset(){
 #
 # @param string _name name of the dataset to destroy
 #
-zfs::destroy_dataset(){
+zfs_destroy_dataset(){
     local _name="$1"
 
     if [ -n "${_name}" -a "${VM_DS_ZFS}" = "1" ]; then
         zfs destroy -rf "${_name}" >/dev/null 2>&1
-        [ $? -eq 0 ] || util::err "failed to destroy ZFS dataset ${_name}"
+        [ $? -eq 0 ] || util_err "failed to destroy ZFS dataset ${_name}"
     fi
 }
 
@@ -76,13 +86,13 @@ zfs::destroy_dataset(){
 # @param string _old the name of the dataset to rename
 # @param string _new the new name
 #
-zfs::rename_dataset(){
+zfs_rename_dataset(){
     local _old="$1"
     local _new="$2"
 
     if [ -n "${_old}" -a -n "${_new}" -a "${VM_DS_ZFS}" = "1" ]; then
         zfs rename "${VM_DS_ZFS_DATASET}/${_old}" "${VM_DS_ZFS_DATASET}/${_new}" >/dev/null 2>&1
-        [ $? -eq 0 ] || util::err "failed to rename ZFS dataset ${VM_DS_ZFS_DATASET}/${_old}"
+        [ $? -eq 0 ] || util_err "failed to rename ZFS dataset ${VM_DS_ZFS_DATASET}/${_old}"
     fi
 }
 
@@ -92,28 +102,30 @@ zfs::rename_dataset(){
 # @param string _size how big to create the dataset
 # @param int _sparse=0 set to 1 for a sparse zvol
 #
-zfs::make_zvol(){
+zfs_make_zvol(){
     local _name="$1"
     local _size="$2"
     local _sparse="$3"
     local _user_opts="$4"
     local _opt="-V"
 
-    [ ! "${VM_DS_ZFS}" = "1" ] && util::err "cannot use ZVOL storage unless ZFS support is enabled"
+    [ ! "${VM_DS_ZFS}" = "1" ] && util_err "cannot use ZVOL storage unless ZFS support is enabled"
     [ "${_sparse}" = "1" ] && _opt="-sV"
 
-    zfs::__format_options "_user_opts" "${_user_opts}"
+    zfs___format_options "_user_opts" "${_user_opts}"
     zfs create ${_opt} ${_size} -o volmode=dev ${_user_opts} "${_name}"
-    [ $? -eq 0 ] || util::err "failed to create new ZVOL ${_name}"
+    [ $? -eq 0 ] || util_err "failed to create new ZVOL ${_name}"
 }
 
 # format options for zfs commands
 # options are stored in configuration separated by a space
 # we need to replace that with -o
 #
+# unchanged - pure string manipulation, nothing FreeBSD-specific
+#
 # @modifies $_val
 #
-zfs::__format_options(){
+zfs___format_options(){
     local _val="$1"
     local _c_opts="$2"
 
@@ -131,13 +143,16 @@ zfs::__format_options(){
 # specify the snapshot name in zfs format guest@snap
 # if no snapshot name is specified, Y-m-d-H:M:S will be used
 #
+# unchanged below (through zfs_clone) - snapshot/rollback/clone are plain
+# zfs commands, identical under OpenZFS on Linux
+#
 # @param flag (-f) force snapshot if guest is running
 # @param string _name the name of the guest to snapshot
 #
-zfs::snapshot(){
+zfs_snapshot(){
     local _name _snap
 
-    cmd::parse_args "$@"
+    cmd_parse_args "$@"
     shift $?
     _name="$1"
 
@@ -150,17 +165,17 @@ zfs::snapshot(){
         _name=${_name%%@*}
     fi
 
-    [ -z "${_name}" ] && help::show "snapshot"
-    datastore::get_guest "${_name}" || util::err "${_name} does not appear to be an existing virtual machine"
-    [ ! "${VM_DS_ZFS}" = "1" ] && util::err "cannot snapshot guests on non-zfs datastores"
+    [ -z "${_name}" ] && help_show "snapshot"
+    datastore_get_guest "${_name}" || util_err "${_name} does not appear to be an existing virtual machine"
+    [ ! "${VM_DS_ZFS}" = "1" ] && util_err "cannot snapshot guests on non-zfs datastores"
     [ -z "${_snap}" ] && _snap=$(date +"%Y-%m-%d-%H:%M:%S")
 
-    if ! vm::confirm_stopped "${_name}" >/dev/null; then
-        [ -z "${VM_OPT_FORCE}" ] && util::err "${_name} must be powered off first (use -f to override)"
+    if ! vm_confirm_stopped "${_name}" >/dev/null; then
+        [ -z "${VM_OPT_FORCE}" ] && util_err "${_name} must be powered off first (use -f to override)"
     fi
 
     zfs snapshot -r ${VM_DS_ZFS_DATASET}/${_name}@${_snap}
-    [ $? -eq 0 ] || util::err "failed to create recursive snapshot of virtual machine"
+    [ $? -eq 0 ] || util_err "failed to create recursive snapshot of virtual machine"
 }
 
 # try to remove a snapshot
@@ -168,7 +183,7 @@ zfs::snapshot(){
 # @param string _name the guest name and snapshot (guest@snap)
 # @return true if successful
 #
-zfs::remove_snapshot(){
+zfs_remove_snapshot(){
     local _name="$1"
     local _snap
 
@@ -177,12 +192,12 @@ zfs::remove_snapshot(){
     _name=${_name%%@*}
 
     # try to load guest
-    datastore::get_guest "${_name}" || util::err "${_name} does not appear to be an existing virtual machine"
-    [ ! "${VM_DS_ZFS}" = "1" ] && util::err "cannot snapshot guests on non-zfs datastores"
+    datastore_get_guest "${_name}" || util_err "${_name} does not appear to be an existing virtual machine"
+    [ ! "${VM_DS_ZFS}" = "1" ] && util_err "cannot snapshot guests on non-zfs datastores"
 
     # remove
     zfs destroy -r ${VM_DS_ZFS_DATASET}/${_name}@${_snap}
-    [ $? -eq 0 ] || util::err "failed to remove snapshot ${VM_DS_ZFS_DATASET}/${_name}@${_snap}"
+    [ $? -eq 0 ] || util_err "failed to remove snapshot ${VM_DS_ZFS_DATASET}/${_name}@${_snap}"
 }
 
 # 'vm rollback'
@@ -195,32 +210,32 @@ zfs::remove_snapshot(){
 # @param flag (-r) force deletion of more recent snapshots
 # @param string _name name of the guest
 #
-zfs::rollback(){
+zfs_rollback(){
     local _name _snap _opt _force _fs _snap_exists
 
     while getopts r _opt; do
         case $_opt in
             r) _force="-r" ;;
-            *) help::show "rollback" ;;
+            *) help_show "rollback" ;;
         esac
     done
 
     shift $((OPTIND - 1))
 
-    [ -z "$1" ] && help::show "rollback"
+    [ -z "$1" ] && help_show "rollback"
 
     _snap_exists=$(echo "${1}" | grep "@")
-    [ -z "${_snap_exists}" ] && util::err "a snapshot name must be provided in guest@snapshot format"
+    [ -z "${_snap_exists}" ] && util_err "a snapshot name must be provided in guest@snapshot format"
 
     _name="${1%%@*}"
     _snap="${1##*@}"
 
-    [ -z "${_name}" -o -z "${_snap}" ] && help::show "rollback"
+    [ -z "${_name}" -o -z "${_snap}" ] && help_show "rollback"
 
-    datastore::get_guest "${_name}" || util::err "${_name} does not appear to be an existing virtual machine"
-    [ ! "${VM_DS_ZFS}" = "1" ] && util::err "cannot rollback guests on non-zfs datastores"
+    datastore_get_guest "${_name}" || util_err "${_name} does not appear to be an existing virtual machine"
+    [ ! "${VM_DS_ZFS}" = "1" ] && util_err "cannot rollback guests on non-zfs datastores"
 
-    vm::confirm_stopped "${_name}" || exit 1
+    vm_confirm_stopped "${_name}" || exit 1
 
     # list all datasets and zvols under guest
     zfs list -o name -rHt filesystem,volume ${VM_DS_ZFS_DATASET}/${_name} | \
@@ -237,7 +252,7 @@ zfs::rollback(){
 # @param string _old the guest to clone
 # @param string _new name of the new guest
 #
-zfs::clone(){
+zfs_clone(){
     local _old="$1"
     local _name="$2"
     local _fs _newfs _snap _snap_exists _fs_list _entry
@@ -245,8 +260,8 @@ zfs::clone(){
     local _uuid=$(uuidgen)
 
     # check args and make sure new guest doesn't already exist
-    [ -z "${_old}" -o -z "${_name}" ] && help::show "clone"
-    datastore::get_guest "${_name}" && util::err "new guest already exists in ${VM_DS_PATH}/${_name}"
+    [ -z "${_old}" -o -z "${_name}" ] && help_show "clone"
+    datastore_get_guest "${_name}" && util_err "new guest already exists in ${VM_DS_PATH}/${_name}"
 
     # try to get snapshot name
     # we support normal zfs syntax for this
@@ -258,25 +273,25 @@ zfs::clone(){
     fi
 
     # make sure old guest exists
-    datastore::get_guest "${_old}" || util::err "${_old} does not appear to be an existing virtual machine"
-    [ ! "${VM_DS_ZFS}" = "1" ] && util::err "cannot clone guests on non-zfs datastores"
+    datastore_get_guest "${_old}" || util_err "${_old} does not appear to be an existing virtual machine"
+    [ ! "${VM_DS_ZFS}" = "1" ] && util_err "cannot clone guests on non-zfs datastores"
 
     # get list of datasets to copy
     _fs_list=$(zfs list -rHo name -t filesystem,volume "${VM_DS_ZFS_DATASET}/${_old}")
-    [ $? -eq 0 ] || util::err "unable to list datasets for ${VM_DS_ZFS_DATASET}/${_old}"
+    [ $? -eq 0 ] || util_err "unable to list datasets for ${VM_DS_ZFS_DATASET}/${_old}"
 
     # generate a short uuid and create snapshot if no custom snap given
     if [ -z "${_snap}" ]; then
-        vm::confirm_stopped "${_old}" || exit 1
-        vm::has_saved_state "${_old}" && util::err "guest appears to be suspended, stop it before cloning"
+        vm_confirm_stopped "${_old}" || exit 1
+        vm_has_saved_state "${_old}" && util_err "guest appears to be suspended, stop it before cloning"
         _snap=$(echo "${_uuid}" |awk -F- '{print $1}')
 
         zfs snapshot -r "${VM_DS_ZFS_DATASET}/${_old}@${_snap}"
-        [ $? -eq 0 ] || util::err "failed to create snapshot ${VM_DS_ZFS_DATASET}/${_old}@${_snap}"
+        [ $? -eq 0 ] || util_err "failed to create snapshot ${VM_DS_ZFS_DATASET}/${_old}@${_snap}"
     else
         for _fs in ${_fs_list}; do
             zfs get creation "${_fs}@${_snap}" >/dev/null 2>&1
-            [ $? -eq 0 ] || util::err "snapshot ${_fs}@${_snap} doesn't seem to exist"
+            [ $? -eq 0 ] || util_err "snapshot ${_fs}@${_snap} doesn't seem to exist"
         done
     fi
 
@@ -285,7 +300,7 @@ zfs::clone(){
         _newfs=$(echo "${_fs}" | sed "s@${VM_DS_ZFS_DATASET}/${_old}@${VM_DS_ZFS_DATASET}/${_name}@")
 
         zfs clone "${_fs}@${_snap}" "${_newfs}"
-        [ $? -eq 0 ] || util::err "error while cloning dataset ${_fs}@${_snap}"
+        [ $? -eq 0 ] || util_err "error while cloning dataset ${_fs}@${_snap}"
     done
 
     # update new guest files
@@ -299,7 +314,45 @@ zfs::clone(){
     fi
 
     # generalise the clone
-    vm::generalise "${_name}"
+    vm_generalise "${_name}"
+}
+
+# get a value from a simple key=value manifest file
+#
+# Linux: replaces FreeBSD's sysrc (a base-system tool for editing
+# rc.conf-style files, not present on Linux) for the small key=value
+# image manifest files below. Matches are on the whole first field before
+# "=", so a value can itself safely contain "=".
+#
+# @param string _file path to the manifest file
+# @param string _key the key to look up
+# @return prints the value on stdout; non-zero (and nothing) if not found
+#
+zfs___manifest_get(){
+    local _file="$1"
+    local _key="$2"
+
+    [ -r "${_file}" ] || return 1
+    awk -F= -v k="${_key}" '$1==k{sub(/^[^=]*=/,""); print; f=1} END{exit !f}' "${_file}"
+}
+
+# set (or replace) a value in a simple key=value manifest file
+# creates the file if it doesn't already exist
+#
+# @param string _file path to the manifest file
+# @param string _key the key to set
+# @param string _value the value to set
+#
+zfs___manifest_set(){
+    local _file="$1"
+    local _key="$2"
+    local _value="$3"
+    local _tmp="${_file}.tmp.$$"
+
+    touch "${_file}" 2>/dev/null
+    awk -F= -v k="${_key}" '$1!=k' "${_file}" > "${_tmp}" 2>/dev/null
+    echo "${_key}=${_value}" >> "${_tmp}"
+    mv "${_tmp}" "${_file}"
 }
 
 # 'vm image create'
@@ -310,7 +363,7 @@ zfs::clone(){
 # @param optional string (-d) description of the image
 # @param string _name name of guest to take image of
 #
-zfs::image_create(){
+zfs_image_create(){
     local _name _opt _desc
     local _uuid _snap _date _no_compress _filename
     local _compress _decompress
@@ -319,7 +372,7 @@ zfs::image_create(){
         case $_opt in
             d) _desc=${OPTARG} ;;
             u) _no_compress="1" ;;
-            *) help::show "image" ;;
+            *) help_show "image" ;;
         esac
     done
 
@@ -329,21 +382,21 @@ zfs::image_create(){
     _snap=${_uuid%%-*}
     _date=$(date -Iseconds)
 
-    [ -z "${_name}" ] && help::show "image"
+    [ -z "${_name}" ] && help_show "image"
     [ -z "${_desc}" ] && _desc="No description provided"
 
-    datastore::get_guest "${_name}" || util::err "${_name} does not appear to be a valid virtual machine"
-    [ -z "${VM_ZFS}" -o -z "${VM_DS_ZFS}" ] && util::err "this command is only supported on zfs datastores"
+    datastore_get_guest "${_name}" || util_err "${_name} does not appear to be a valid virtual machine"
+    [ -z "${VM_ZFS}" -o -z "${VM_DS_ZFS}" ] && util_err "this command is only supported on zfs datastores"
 
     # create the image dataset if we don't have it
     if [ ! -e "${vm_dir}/images" ]; then
         zfs create "${VM_ZFS_DATASET}/images" >/dev/null 2>&1
-        [ $? -eq 0 ] || util::err "failed to create image store ${VM_ZFS_DATASET}/images"
+        [ $? -eq 0 ] || util_err "failed to create image store ${VM_ZFS_DATASET}/images"
     fi
 
     # try to snapshot
     zfs snapshot -r "${VM_DS_ZFS_DATASET}/${_name}@${_snap}" >/dev/null 2>&1
-    [ $? -eq 0 ] || util::err "failed to create snapshot of source dataset ${VM_DS_ZFS_DATASET}/${_name}@${_snap}"
+    [ $? -eq 0 ] || util_err "failed to create snapshot of source dataset ${VM_DS_ZFS_DATASET}/${_name}@${_snap}"
 
     # copy source
     if [ -n "${_no_compress}" ]; then
@@ -354,8 +407,8 @@ zfs::image_create(){
     else
         _filename="${_uuid}.zfs.z"
 
-        config::core::get "_compress" "compress"
-        config::core::get "_decompress" "decompress"
+        config_core_get "_compress" "compress"
+        config_core_get "_decompress" "decompress"
 
         # use defaults if either of these settings are missing
         # no point using user defined compress if we don't know how to decompress
@@ -374,11 +427,11 @@ zfs::image_create(){
     zfs destroy -r ${VM_DS_ZFS_DATASET}/${_name}@${_snap}
 
     # create a description file
-    sysrc -inqf "${vm_dir}/images/${_uuid}.manifest" "description=${_desc}" >/dev/null 2>&1
-    sysrc -inqf "${vm_dir}/images/${_uuid}.manifest" "created=${_date}" >/dev/null 2>&1
-    sysrc -inqf "${vm_dir}/images/${_uuid}.manifest" "name=${_name}" >/dev/null 2>&1
-    sysrc -inqf "${vm_dir}/images/${_uuid}.manifest" "filename=${_filename}" >/dev/null 2>&1
-    sysrc -inqf "${vm_dir}/images/${_uuid}.manifest" "decompress=${_decompress}" >/dev/null 2>&1
+    zfs___manifest_set "${vm_dir}/images/${_uuid}.manifest" "description" "${_desc}"
+    zfs___manifest_set "${vm_dir}/images/${_uuid}.manifest" "created" "${_date}"
+    zfs___manifest_set "${vm_dir}/images/${_uuid}.manifest" "name" "${_name}"
+    zfs___manifest_set "${vm_dir}/images/${_uuid}.manifest" "filename" "${_filename}"
+    zfs___manifest_set "${vm_dir}/images/${_uuid}.manifest" "decompress" "${_decompress}"
 
     echo "Image of ${_name} created with UUID ${_uuid}"
 }
@@ -389,14 +442,14 @@ zfs::image_create(){
 # @param string _uuid the uuid of the image to use
 # @param string _name name of the new guest
 #
-zfs::image_provision(){
+zfs_image_provision(){
     local _uuid _name _file _oldname _entry _num=0 _type
     local _datastore="default" _decompress
 
     while getopts d: _opt ; do
         case $_opt in
             d) _datastore="${OPTARG}" ;;
-            *) help::show "image" ;;
+            *) help_show "image" ;;
         esac
     done
 
@@ -404,20 +457,20 @@ zfs::image_provision(){
     _uuid="$1"
     _name="$2"
 
-    [ -z "${_uuid}" -o -z "${_name}" ] && help::show "image"
-    [ ! -e "${vm_dir}/images/${_uuid}.manifest" ] && util::err "unable to locate image with uuid ${_uuid}"
-    datastore::get_guest "${_name}" && util::err "new guest already exists in ${VM_DS_PATH}/${_name}"
+    [ -z "${_uuid}" -o -z "${_name}" ] && help_show "image"
+    [ ! -e "${vm_dir}/images/${_uuid}.manifest" ] && util_err "unable to locate image with uuid ${_uuid}"
+    datastore_get_guest "${_name}" && util_err "new guest already exists in ${VM_DS_PATH}/${_name}"
 
     # get the data filename
-    _file=$(sysrc -inqf "${vm_dir}/images/${_uuid}.manifest" filename)
+    _file=$(zfs___manifest_get "${vm_dir}/images/${_uuid}.manifest" filename)
     _type=${_file##*.}
 
-    _oldname=$(sysrc -inqf "${vm_dir}/images/${_uuid}.manifest" name)
-    [ -z "${_file}" -o -z "${_oldname}" ] && util::err "unable to locate required details from the specified image manifest"
-    [ ! -e "${vm_dir}/images/${_file}" ] && util::err "image data file does not exist: ${vm_dir}/images/${_file}"
+    _oldname=$(zfs___manifest_get "${vm_dir}/images/${_uuid}.manifest" name)
+    [ -z "${_file}" -o -z "${_oldname}" ] && util_err "unable to locate required details from the specified image manifest"
+    [ ! -e "${vm_dir}/images/${_file}" ] && util_err "image data file does not exist: ${vm_dir}/images/${_file}"
 
     # get the datastore to create on
-    datastore::get "${_datastore}" || util::err "unable to locate datastore '${_datastore}'"
+    datastore_get "${_datastore}" || util_err "unable to locate datastore '${_datastore}'"
 
     # try to receive
     echo "Unpacking guest image, this may take some time..."
@@ -426,27 +479,27 @@ zfs::image_provision(){
     case ${_type} in
         zfs) cat "${vm_dir}/images/${_file}" | zfs recv "${VM_DS_ZFS_DATASET}/${_name}" ;;
         xz)  xz -dc "${vm_dir}/images/${_file}" 2>/dev/null | zfs recv "${VM_DS_ZFS_DATASET}/${_name}" ;;
-        z)   _decompress=$(sysrc -inqf "${vm_dir}/images/${_uuid}.manifest" decompress)
-             [ -z "${_decompress}" ] && util::err "unable to locate decompression configuration"
+        z)   _decompress=$(zfs___manifest_get "${vm_dir}/images/${_uuid}.manifest" decompress)
+             [ -z "${_decompress}" ] && util_err "unable to locate decompression configuration"
              ${_decompress} <"${vm_dir}/images/${_file}" 2>/dev/null | zfs recv "${VM_DS_ZFS_DATASET}/${_name}" ;;
-        *)   util::err "unsupported guest image type - '${_type}'" ;;
+        *)   util_err "unsupported guest image type - '${_type}'" ;;
     esac
 
     # error unpacking?
-    [ $? -eq 0 ] || util::err "errors occurred while trying to unpackage the image file"
+    [ $? -eq 0 ] || util_err "errors occurred while trying to unpackage the image file"
 
     # remove the original snapshot
     zfs destroy -r "${VM_DS_ZFS_DATASET}/${_name}@${_uuid%%-*}" >/dev/null 2>&1
 
     # rename the guest configuration file
     mv "${VM_DS_PATH}/${_name}/${_oldname}.conf" "${VM_DS_PATH}/${_name}/${_name}.conf" >/dev/null 2>&1
-    [ $? -eq 0 ] || util::err "unpackaged image but unable to update guest configuration file"
+    [ $? -eq 0 ] || util_err "unpackaged image but unable to update guest configuration file"
 
     # update mac addresses and create a new uuid
     _uuid=$(uuidgen)
 
     # remove unique settings from new image
-    vm::generalise "${_name}"
+    vm_generalise "${_name}"
 
     # vm may be started when 'vm image create' is executed
     rm -f "${VM_DS_PATH}/${_name}/run.lock" >/dev/null 2>&1
@@ -456,8 +509,8 @@ zfs::image_provision(){
 # 'vm image list'
 # list available images
 #
-zfs::image_list(){
-    local _file _uuid _ext
+zfs_image_list(){
+    local _file _uuid _ext _desc _created _name
     local _format="%s^%s^%s^%s\n"
 
     {
@@ -469,9 +522,9 @@ zfs::image_list(){
         while read _file; do
             if [ "${_file##*.}" = "manifest" ]; then
                 _uuid=${_file%.*}
-                _desc=$(sysrc -inqf "${vm_dir}/images/${_uuid}.manifest" description)
-                _created=$(sysrc -inqf "${vm_dir}/images/${_uuid}.manifest" created)
-                _name=$(sysrc -inqf "${vm_dir}/images/${_uuid}.manifest" name)
+                _desc=$(zfs___manifest_get "${vm_dir}/images/${_uuid}.manifest" description)
+                _created=$(zfs___manifest_get "${vm_dir}/images/${_uuid}.manifest" created)
+                _name=$(zfs___manifest_get "${vm_dir}/images/${_uuid}.manifest" name)
 
                 printf "${_format}" "${_uuid}" "${_name}" "${_created}" "${_desc}"
             fi
@@ -484,16 +537,16 @@ zfs::image_list(){
 #
 # @param string _uuid the uuid of the image
 #
-zfs::image_destroy(){
+zfs_image_destroy(){
     local _uuid="$1"
     local _file
 
-    [ -z "${_uuid}" ] && help::show "image"
-    [ ! -e "${vm_dir}/images/${_uuid}.manifest" ] && util::err "unable to locate image with uuid ${_uuid}"
+    [ -z "${_uuid}" ] && help_show "image"
+    [ ! -e "${vm_dir}/images/${_uuid}.manifest" ] && util_err "unable to locate image with uuid ${_uuid}"
 
     # get the image filename
-    _file=$(sysrc -inqf "${vm_dir}/images/${_uuid}.manifest" filename)
-    [ -z "${_file}" ] && util::err "unable to locate filename for the specified image"
+    _file=$(zfs___manifest_get "${vm_dir}/images/${_uuid}.manifest" filename)
+    [ -z "${_file}" ] && util_err "unable to locate filename for the specified image"
 
     unlink "${vm_dir}/images/${_uuid}.manifest"
     unlink "${vm_dir}/images/${_file}"

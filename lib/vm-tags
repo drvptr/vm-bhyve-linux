@@ -6,58 +6,58 @@
 # @param string _name target virtual machine name
 # @param string _tags ...
 #
-tags::add(){
+tags_add(){
     local _name _tags _tag
 
     _name="$1"
     shift
     _tags="$@"
 
-    [ -z "${_name}" ] && help::show "tags"
-    [ -z "${_tags}" ] && help::show "tags"
+    [ -z "${_name}" ] && help_show "tags"
+    [ -z "${_tags}" ] && help_show "tags"
 
     for _tag in ${_tags}; do
-        util::check_name "${_tag}" || util::err "invalid tag name - '${_tag}'"
+        util_check_name "${_tag}" || util_err "invalid tag name - '${_tag}'"
     done
 
-    datastore::get_guest "${_name}" || util::err "${_name} doesn't appear to be a valid virtual machine"
+    datastore_get_guest "${_name}" || util_err "${_name} doesn't appear to be a valid virtual machine"
 
-    config::file_append "${VM_DS_PATH}/${_name}/${_name}.conf" "tags" "${_tags}"
+    config_file_append "${VM_DS_PATH}/${_name}/${_name}.conf" "tags" "${_tags}"
 }
 
 # Remove tags from specified virtual machine
 # @param string _name target virtual machine name
 # @param string _tags ...
 #
-tags::remove(){
+tags_remove(){
     local _name _tags
 
     _name="$1"
     shift
     _tags="$@"
 
-    [ -z "${_name}" ] && help::show "tags"
-    [ -z "${_tags}" ] && help::show "tags"
+    [ -z "${_name}" ] && help_show "tags"
+    [ -z "${_tags}" ] && help_show "tags"
 
-    datastore::get_guest "${_name}" || util::err "${_name} doesn't appear to be a valid virtual machine"
+    datastore_get_guest "${_name}" || util_err "${_name} doesn't appear to be a valid virtual machine"
 
-    config::file_remove_value "${VM_DS_PATH}/${_name}/${_name}.conf" "tags" "${_tags}"
+    config_file_remove_value "${VM_DS_PATH}/${_name}/${_name}.conf" "tags" "${_tags}"
 }
 
 # List tags assigned to target
 # @param string _name
 #
-tags::list(){
+tags_list(){
     local _name
     local _tags
 
     _name="$1"
 
-    [ -z "${_name}" ] && help::show "tags"
+    [ -z "${_name}" ] && help_show "tags"
 
-    datastore::get_guest "${_name}" || util::err "${_name} doesn't appear to be a valid virtual machine"
+    datastore_get_guest "${_name}" || util_err "${_name} doesn't appear to be a valid virtual machine"
 
-    config::load_file_value "_tags" "${VM_DS_PATH}/${_name}/${_name}.conf" "tags"
+    config_load_file_value "_tags" "${VM_DS_PATH}/${_name}/${_name}.conf" "tags"
 
     echo "${_tags}"
 }
@@ -65,17 +65,17 @@ tags::list(){
 # Shows a list of VMs that have specified tag
 # @param string tag
 #
-tags::find(){
+tags_find(){
     local _tag _result
 
     _result=""
     _tag="$1"
     shift
 
-    [ -z "${_tag}" ] && help::show "tags"
+    [ -z "${_tag}" ] && help_show "tags"
 
     for _ds in ${VM_DATASTORE_LIST}; do
-        datastore::get "${_ds}" || continue
+        datastore_get "${_ds}" || continue
 
     exec 9<<EOF
 $(ls -1 "${VM_DS_PATH}" 2>/dev/null)
@@ -83,7 +83,7 @@ EOF
 
         while read _name; do
             [ ! -e "${VM_DS_PATH}/${_name}/${_name}.conf" ] && continue
-            config::load_file_value "_tags" "${VM_DS_PATH}/${_name}/${_name}.conf" "tags"
+            config_load_file_value "_tags" "${VM_DS_PATH}/${_name}/${_name}.conf" "tags"
 	    printf '%s\n' "${_tags}" | grep -q -w "${_tag}"
             if [ $? -eq 0 ]; then
                 _result="${_result} ${_name}"

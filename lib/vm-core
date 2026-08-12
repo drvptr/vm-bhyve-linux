@@ -3,19 +3,19 @@
 # SPDX-FileCopyrightText: 2016 Matt Churchyard <churchers@gmail.com>
 # SPDX-FileCopyrightText: 2026 Petr Derbyshev <drvpotr@gmail.com>
 
-qemu::qmp(){
+qemu_qmp(){
     local _name="$1"
     local _command="$2"
     local _socket="${VM_DS_PATH}/${_name}/${_name}.qmp"
 
     [ -S "${_socket}" ] || \
-        util::err "QMP socket not found for ${_name}"
+        util_err "QMP socket not found for ${_name}"
 
     printf '%s\n' "${_command}" | \
         socat - UNIX-CONNECT:"${_socket}"
 }
 
-vm::getpid(){
+vm_getpid(){
 
     local _name="$1"
     local _pidfile="${VM_DS_PATH}/${_name}/${_name}.pid"
@@ -32,7 +32,7 @@ vm::getpid(){
 # @param int _timeout seconds to wait before giving up (default 90)
 # @return 0 if the process exited, 1 if it is still running after the timeout
 #
-qemu::wait_exit(){
+qemu_wait_exit(){
     local _pid="$1"
     local _timeout="${2:-90}"
     local _waited=0
@@ -49,7 +49,7 @@ qemu::wait_exit(){
 # 'vm list'
 # list virtual machines
 #
-core::list(){
+core_list(){
     local _running_only
     local _name _loader _cpu _our_host
     local _memory _run _vm _auto _num _vnc _pid
@@ -61,13 +61,13 @@ core::list(){
             r) _running_only='true' ;;
             t) _filter_tag="${OPTARG}" ;;
             v) VM_OPT_VERBOSE="1" ;;
-            *) help::show "list" ;;
+            *) help_show "list" ;;
         esac
     done
 
     _our_host=$(hostname)
 
-    vm::running_load
+    vm_running_load
 
     [ -n "${VM_OPT_VERBOSE}" ] && _format="%s^%s^%s^%s^%s^%s^%s^%5s^%8s^%14s^%s^%s\n";
 
@@ -80,17 +80,17 @@ core::list(){
         fi
 
         for _ds in ${VM_DATASTORE_LIST}; do
-            datastore::get "${_ds}" || continue
+            datastore_get "${_ds}" || continue
 
             ls -1 "${VM_DS_PATH}" 2>/dev/null | \
             while read _name; do
                 [ ! -e "${VM_DS_PATH}/${_name}/${_name}.conf" ] && continue
 
-                config::load "${VM_DS_PATH}/${_name}/${_name}.conf"
-                config::get "_loader" "loader" "none"
-                config::get "_cpu" "cpu"
-                config::get "_memory" "memory"
-                config::get "_tags" "tags" "-"
+                config_load "${VM_DS_PATH}/${_name}/${_name}.conf"
+                config_get "_loader" "loader" "none"
+                config_get "_cpu" "cpu"
+                config_get "_memory" "memory"
+                config_get "_tags" "tags" "-"
 
                 # filter guests by tag if specified by -t option
                 if [ -n "${_filter_tag}" ]; then
@@ -109,11 +109,11 @@ core::list(){
                 _uptime="-"
 
                 # check if the guest is running
-                if vm::running_check "_run" "_pid" "${_name}" || \
+                if vm_running_check "_run" "_pid" "${_name}" || \
                     [ -e "${VM_DS_PATH}/${_name}/run.lock" -a "$(head -n1 ${VM_DS_PATH}/${_name}/run.lock 2>/dev/null)" = "${_our_host}" ]; then
 
                     # if running and graphics, try to get vnc port
-                    if config::yesno "graphics"; then
+                    if config_yesno "graphics"; then
                         _vnc=$(grep ^vnc "${VM_DS_PATH}/${_name}/console" 2>/dev/null |cut -d= -f2)
                         [ -z "${_vnc}" ] && _vnc="-"
                     fi
@@ -123,11 +123,11 @@ core::list(){
                     _state=$(ps -o"%cpu"= -o"rss"= -o"etime"= -p "${_pid}")
 
                     if [ -n "${_state}" ]; then
-                        util::get_part "_pcpu" "${_state}" 1
-                        util::get_part "_rss" "${_state}" 2
-                        util::get_part "_uptime" "${_state}" 3
+                        util_get_part "_pcpu" "${_state}" 1
+                        util_get_part "_rss" "${_state}" 2
+                        util_get_part "_uptime" "${_state}" 3
 
-                        [ -n "${_rss}" ] && _rss=$(info::__bytes_human "${_rss}" 1 2)
+                        [ -n "${_rss}" ] && _rss=$(info___bytes_human "${_rss}" 1 2)
                         _uptime=$(echo "${_uptime}" |sed 's/\-/d /')
                     fi
                 fi
@@ -170,7 +170,7 @@ core::list(){
 # @param optional string (-s) _size guest size (default = 20G)
 # @param string _name the name of the guest to create
 #
-core::create(){
+core_create(){
     local _name _opt _size _vmdir _disk _disk_dev _num=0
     local _zfs_opts _disk_size _template="default" _ds="default" _ds_path _img _cpu _memory _uuid
     local _enable_cloud_init _cloud_init_dir _ssh_public_keys _ssh_public_key _ssh_key_file _network_config _mac
@@ -189,78 +189,82 @@ core::create(){
             n) _network_config=${OPTARG} ;;
             u) _user_data_file=${OPTARG} ;;
 
-            *) help::show "create" ;;
+            *) help_show "create" ;;
         esac
     done
 
     shift $((OPTIND - 1))
     _name=$1
 
-    [ -z "${_name}" ] && help::show "create"
+    [ -z "${_name}" ] && help_show "create"
 
     # check guest name
-    util::check_name "${_name}" || util::err "invalid virtual machine name - '${_name}'"
-    datastore::get_guest "${_name}" && util::err "virtual machine already exists in ${VM_DS_PATH}/${_name}"
-    datastore::get "${_ds}" || util::err "unable to load datastore - '${_ds}'"
+    util_check_name "${_name}" || util_err "invalid virtual machine name - '${_name}'"
+    datastore_get_guest "${_name}" && util_err "virtual machine already exists in ${VM_DS_PATH}/${_name}"
+    datastore_get "${_ds}" || util_err "unable to load datastore - '${_ds}'"
 
     [ ! -f "${vm_dir}/.templates/${_template}.conf" ] && \
-        util::err "unable to find template ${vm_dir}/.templates/${_template}.conf"
+        util_err "unable to find template ${vm_dir}/.templates/${_template}.conf"
 
     # we need to get disk0 name and device type from the template
-    config::load "${vm_dir}/.templates/${_template}.conf"
-    config::get "_disk" "disk0_name"
-    config::get "_disk_dev" "disk0_dev"
-    config::get "_disk_size" "disk0_size" "20G"
-    config::get "_zfs_opts" "zfs_dataset_opts"
+    config_load "${vm_dir}/.templates/${_template}.conf"
+    config_get "_disk" "disk0_name"
+    config_get "_disk_dev" "disk0_dev"
+    config_get "_disk_size" "disk0_size" "20G"
+    config_get "_zfs_opts" "zfs_dataset_opts"
 
     # make sure template has a disk before we start creating anything
-    [ -z "${_disk}" ] && util::err "template is missing disk0_name specification"
+    [ -z "${_disk}" ] && util_err "template is missing disk0_name specification"
 
     # get ssh public key for cloud-init from file
     if [ -n "${_ssh_key_file}" ]; then
-      [ -z "${_enable_cloud_init}" ] && util::err "cloud-init is required for injecting public key. Use -C to enable it."
-      [ ! -r "${_ssh_key_file}" ] && util::err "can't read file with public key (${_ssh_key_file})"
+      [ -z "${_enable_cloud_init}" ] && util_err "cloud-init is required for injecting public key. Use -C to enable it."
+      [ ! -r "${_ssh_key_file}" ] && util_err "can't read file with public key (${_ssh_key_file})"
       _ssh_public_keys="$(sed -e '/^$/d' -e '/^#/d' "${_ssh_key_file}")"
     fi
 
     # validate user-data file for cloud-init
     if [ -n "${_user_data_file}" ]; then
-      [ -z "${_enable_cloud_init}" ] && util::err "cloud-init is required for user-data file. Use -C to enable it."
-      [ ! -r "${_user_data_file}" ] && util::err "can't read user-data file (${_user_data_file})"
+      [ -z "${_enable_cloud_init}" ] && util_err "cloud-init is required for user-data file. Use -C to enable it."
+      [ ! -r "${_user_data_file}" ] && util_err "can't read user-data file (${_user_data_file})"
     fi
 
     # -u and -k are mutually exclusive
     if [ -n "${_user_data_file}" ] && [ -n "${_ssh_key_file}" ]; then
-      util::err "-u and -k are mutually exclusive; use one or the other"
+      util_err "-u and -k are mutually exclusive; use one or the other"
     fi
 
     # validate network config for cloud-init
     if [ -n "${_network_config}" ]; then
-      [ -z "${_enable_cloud_init}" ] && util::err "cloud-init is required for network config. Use -C to enable it."
+      [ -z "${_enable_cloud_init}" ] && util_err "cloud-init is required for network config. Use -C to enable it."
     fi
 
     # if we're on zfs, make a new filesystem
-    zfs::make_dataset "${VM_DS_ZFS_DATASET}/${_name}" "${_zfs_opts}"
+    zfs_make_dataset "${VM_DS_ZFS_DATASET}/${_name}" "${_zfs_opts}"
 
     [ ! -d "${VM_DS_PATH}/${_name}" ] && mkdir "${VM_DS_PATH}/${_name}" >/dev/null 2>&1
-    [ ! -d "${VM_DS_PATH}/${_name}" ] && util::err "unable to create virtual machine directory ${VM_DS_PATH}/${_name}"
+    [ ! -d "${VM_DS_PATH}/${_name}" ] && util_err "unable to create virtual machine directory ${VM_DS_PATH}/${_name}"
 
     cp "${vm_dir}/.templates/${_template}.conf" "${VM_DS_PATH}/${_name}/${_name}.conf"
-    [ $? -eq 0 ] || util::err "unable to copy template to virtual machine directory"
+    [ $? -eq 0 ] || util_err "unable to copy template to virtual machine directory"
 
     # generate a uuid
-    _uuid=$(uuidgen)
-    config::set "${_name}" "uuid" ${_uuid}
+    # uuidgen comes from util-linux and isn't installed everywhere; the
+    # kernel always provides one. Never write an empty uuid= to the config.
+    _uuid=$(uuidgen 2>/dev/null)
+    [ -z "${_uuid}" ] && _uuid=$(cat /proc/sys/kernel/random/uuid 2>/dev/null)
+    [ -z "${_uuid}" ] && util_err "unable to generate a uuid for ${_name}"
+    config_set "${_name}" "uuid" ${_uuid}
 
     # get any zvol options
-    config::get "_zfs_opts" "zfs_zvol_opts"
+    config_get "_zfs_opts" "zfs_zvol_opts"
 
     # generate mac address - it's saved in _mac variable
-    vm::generate_static_mac
+    vm_generate_static_mac
 
     # Optional overrides
-    [ -n "${_cpu}" ] && config::set "${_name}" "cpu" "${_cpu}"
-    [ -n "${_memory}" ] && config::set "${_name}" "memory" "${_memory}"
+    [ -n "${_cpu}" ] && config_set "${_name}" "cpu" "${_cpu}"
+    [ -n "${_memory}" ] && config_set "${_name}" "memory" "${_memory}"
     # use cmd line size for disk 0 if specified
     [ -n "${_size}" ] && _disk_size="${_size}"
 
@@ -268,12 +272,12 @@ core::create(){
     while [ -n "${_disk}" ]; do
         case "${_disk_dev}" in
             zvol)
-                zfs::make_zvol "${VM_DS_ZFS_DATASET}/${_name}/${_disk}" "${_disk_size}" "0" "${_zfs_opts}"
-                [ $_num -eq 0 ] && [ ! -z "$_img" ] && core::write_img "/dev/zvol/${VM_DS_ZFS_DATASET}/${_name}/${_disk}" "${_img}" "${_disk_dev}" "${_disk_size}"
+                zfs_make_zvol "${VM_DS_ZFS_DATASET}/${_name}/${_disk}" "${_disk_size}" "0" "${_zfs_opts}"
+                [ $_num -eq 0 ] && [ ! -z "$_img" ] && core_write_img "/dev/zvol/${VM_DS_ZFS_DATASET}/${_name}/${_disk}" "${_img}" "${_disk_dev}" "${_disk_size}"
                 ;;
             sparse-zvol)
-                zfs::make_zvol "${VM_DS_ZFS_DATASET}/${_name}/${_disk}" "${_disk_size}" "1" "${_zfs_opts}"
-                [ $_num -eq 0 ] && [ ! -z "$_img" ] && core::write_img "/dev/zvol/${VM_DS_ZFS_DATASET}/${_name}/${_disk}" "${_img}" "${_disk_dev}" "${_disk_size}"
+                zfs_make_zvol "${VM_DS_ZFS_DATASET}/${_name}/${_disk}" "${_disk_size}" "1" "${_zfs_opts}"
+                [ $_num -eq 0 ] && [ ! -z "$_img" ] && core_write_img "/dev/zvol/${VM_DS_ZFS_DATASET}/${_name}/${_disk}" "${_img}" "${_disk_dev}" "${_disk_size}"
                 ;;
             custom)
                 ;;
@@ -281,33 +285,33 @@ core::create(){
                 ;;
             *)
                 truncate -s "${_disk_size}" "${VM_DS_PATH}/${_name}/${_disk}"
-                [ $? -eq 0 ] || util::err "failed to create sparse file for disk image"
+                [ $? -eq 0 ] || util_err "failed to create sparse file for disk image"
 
                 # make sure only owner can read the disk image
                 chmod 600 "${VM_DS_PATH}/${_name}/${_disk}"
-                [ $_num -eq 0 ] && [ ! -z "$_img" ] && core::write_img "${VM_DS_PATH}/${_name}/${_disk}" "${_img}" "file" "${_disk_size}"
+                [ $_num -eq 0 ] && [ ! -z "$_img" ] && core_write_img "${VM_DS_PATH}/${_name}/${_disk}" "${_img}" "file" "${_disk_size}"
                 ;;
         esac
 
         # scrap size option from guest template
         # disk size has already been consumed when the disk was created
-        config::unset "${_name}" "disk${_num}_size"
+        config_unset "${_name}" "disk${_num}_size"
 
         # look for another disk
         _num=$((_num + 1))
-        config::get "_disk" "disk${_num}_name"
-        config::get "_disk_dev" "disk${_num}_dev"
-        config::get "_disk_size" "disk${_num}_size" "20G"
+        config_get "_disk" "disk${_num}_name"
+        config_get "_disk_dev" "disk${_num}_dev"
+        config_get "_disk_size" "disk${_num}_size" "20G"
     done
 
     if [ -n "${_enable_cloud_init}" ]; then
-        core::create_cloud_init
+        core_create_cloud_init
     fi
 
     exit 0
 }
 
-core::create_cloud_init(){
+core_create_cloud_init(){
     local _cloud_init_dir _hostname
     local _network_config_interface _network_config_ipaddress _network_config_gateway4 \
           _network_config_gateway6 _network_config_nameservers _network_config_searchdomains \
@@ -321,8 +325,8 @@ core::create_cloud_init(){
     mkdir -p "${_cloud_init_dir}"
 
     if [ -n "${_network_config}" ]; then
-        core::parse_netconfig "${_network_config}"
-        core::compile_network_config > "${_cloud_init_dir}/network-config"
+        core_parse_netconfig "${_network_config}"
+        core_compile_network_config > "${_cloud_init_dir}/network-config"
 
         # Override default hostname when network config is passed to cloud-init
         if [ ! -z "${_network_config_hostname}" ]; then
@@ -357,9 +361,9 @@ EOF
         fi
     fi
 
-    config::set "${_name}" "disk${_num}_type" "ahci-cd"
-    config::set "${_name}" "disk${_num}_name" "seed.iso"
-    config::set "${_name}" "disk${_num}_dev" "file"
+    config_set "${_name}" "disk${_num}_type" "ahci-cd"
+    config_set "${_name}" "disk${_num}_name" "seed.iso"
+    config_set "${_name}" "disk${_num}_dev" "file"
 }
 
 
@@ -368,7 +372,7 @@ EOF
 # @private
 # @param string netconfig
 #
-core::parse_netconfig(){
+core_parse_netconfig(){
     local _network_config
 
     _network_config="$1"
@@ -394,7 +398,7 @@ core::parse_netconfig(){
 #
 # @private
 #
-core::compile_network_config(){
+core_compile_network_config(){
     local _addr _ipv4_found ipv6_found
     local _tmpfile=$(mktemp)
 
@@ -461,7 +465,7 @@ EOF
         fi
 
         if [ -n "${_network_config_gateway6}" ]; then
-            echo "      - to: ::/0" >> ${_tmpfile}
+            echo "      - to: _/0" >> ${_tmpfile}
             echo "        via: ${_network_config_gateway6}" >> ${_tmpfile}
         fi
     fi
@@ -477,10 +481,10 @@ EOF
 # @param string _disk_dev device to write image to
 # @param string _img the img file in $vm_dir/.img to use
 #
-core::write_img(){
+core_write_img(){
     local _disk_dev _img _imgpath
 
-    cmd::parse_args "$@"
+    cmd_parse_args "$@"
     shift $?
     _disk_dev="${1}"
     _img="$2"
@@ -500,17 +504,17 @@ core::write_img(){
     done
 
     # just run start with an iso
-    datastore::img_find "_imgpath" "${_img}" || util::err "unable to locate img file - '${_img}'"
+    datastore_img_find "_imgpath" "${_img}" || util_err "unable to locate img file - '${_img}'"
     qemu-img dd -O raw if="${_imgpath}" of="${_disk_dev}" bs=1M
     if [ $? -ne 0 ]; then
-        util::err "failed to write img file with qemu-img"
+        util_err "failed to write img file with qemu-img"
     fi
 
     # if disk type is file then we need to resize it
     if [ "${_disk_type}" = "file" ]; then
         qemu-img resize -q -f raw "${_disk_dev}" "${_disk_size}"
         if [ $? -ne 0 ]; then
-            util::err "failed to resize img file with qemu-img"
+            util_err "failed to resize img file with qemu-img"
         fi
     fi
 }
@@ -523,7 +527,7 @@ core::write_img(){
 # @param string (-s) _sopt for disk the size, for network the virtual switch name
 # @param string _name name of the guest
 #
-core::add(){
+core_add(){
     local _name _device _type _sopt _opt
 
     while getopts d:t:s: _opt; do
@@ -531,7 +535,7 @@ core::add(){
             d) _device=${OPTARG} ;;
             t) _type=${OPTARG} ;;
             s) _sopt=${OPTARG} ;;
-            *) help::show "add";;
+            *) help_show "add";;
         esac
     done
 
@@ -539,13 +543,13 @@ core::add(){
     _name="$1"
 
     # check guest
-    [ -z "${_name}" ] && help::show "add"
-    datastore::get_guest "${_name}" || "${_name} does not appear to be a valid virtual machine"
+    [ -z "${_name}" ] && help_show "add"
+    datastore_get_guest "${_name}" || "${_name} does not appear to be a valid virtual machine"
 
     case "${_device}" in
-        disk)    core::add_disk "${_name}" "${_type}" "${_sopt}" ;;
-        network) core::add_network "${_name}" "${_sopt}" ;;
-        *)       util::err "device must be one of the following: disk network" ;;
+        disk)    core_add_disk "${_name}" "${_type}" "${_sopt}" ;;
+        network) core_add_network "${_name}" "${_sopt}" ;;
+        *)       util_err "device must be one of the following: disk network" ;;
     esac
 }
 
@@ -558,7 +562,7 @@ core::add(){
 # @param string _device type of device file|zvol|sparse-zvol
 # @param string _size size of the disk to create
 #
-core::add_disk(){
+core_add_disk(){
     local _name="$1"
     local _device="$2"
     local _size="$3"
@@ -566,46 +570,46 @@ core::add_disk(){
 
     : ${_device:=file}
 
-    [ -z "${_size}" ] && help::show "add"
+    [ -z "${_size}" ] && help_show "add"
 
     # get the last existing disk
-    config::load "${VM_DS_PATH}/${_name}/${_name}.conf"
-    config::get "_zfs_opts" "zfs_zvol_opts"
+    config_load "${VM_DS_PATH}/${_name}/${_name}.conf"
+    config_get "_zfs_opts" "zfs_zvol_opts"
 
     while true; do
-        config::get "_curr" "disk${_num}_name"
+        config_get "_curr" "disk${_num}_name"
         [ -z "${_curr}" ] && break
-        config::get "_emulation" "disk${_num}_type"
+        config_get "_emulation" "disk${_num}_type"
         _num=$((_num + 1))
     done
 
-    [ -z "${_emulation}" ] && util::err "failed to get emulation type of the existing guest disks"
+    [ -z "${_emulation}" ] && util_err "failed to get emulation type of the existing guest disks"
 
     # create the disk first, then update config if no problems
     case "${_device}" in
         zvol)
-            zfs::make_zvol "${VM_DS_ZFS_DATASET}/${_name}/disk${_num}" "${_size}" "0" "${_zfs_opts}"
+            zfs_make_zvol "${VM_DS_ZFS_DATASET}/${_name}/disk${_num}" "${_size}" "0" "${_zfs_opts}"
             _diskname="disk${_num}"
             ;;
         sparse-zvol)
-            zfs::make_zvol "${VM_DS_ZFS_DATASET}/${_name}/disk${_num}" "${_size}" "1" "${_zfs_opts}"
+            zfs_make_zvol "${VM_DS_ZFS_DATASET}/${_name}/disk${_num}" "${_size}" "1" "${_zfs_opts}"
             _diskname="disk${_num}"
             ;;
         file)
             truncate -s "${_size}" "${VM_DS_PATH}/${_name}/disk${_num}.img"
-            [ $? -eq 0 ] || util::err "failed to create sparse file for disk image"
+            [ $? -eq 0 ] || util_err "failed to create sparse file for disk image"
             _diskname="disk${_num}.img"
             ;;
         *)
-            util::err "device type must be one of the following: zvol sparse-zvol file"
+            util_err "device type must be one of the following: zvol sparse-zvol file"
             ;;
     esac
 
     # update configuration
-    config::set "${_name}" "disk${_num}_name" "${_diskname}"
-    config::set "${_name}" "disk${_num}_type" "${_emulation}" "1"
-    config::set "${_name}" "disk${_num}_dev" "${_device}" "1"
-    [ $? -eq 0 ] || util::err "disk image created but errors while updating guest configuration"
+    config_set "${_name}" "disk${_num}_name" "${_diskname}"
+    config_set "${_name}" "disk${_num}_type" "${_emulation}" "1"
+    config_set "${_name}" "disk${_num}_dev" "${_device}" "1"
+    [ $? -eq 0 ] || util_err "disk image created but errors while updating guest configuration"
 }
 
 # add network interface to guest
@@ -614,18 +618,18 @@ core::add_disk(){
 # @param string _name name of the guest
 # @param string _switch the switch name for this interface
 #
-core::add_network(){
+core_add_network(){
     local _name="$1"
     local _switch="$2"
     local _num=0 _curr _emulation
 
-    [ -z "${_switch}" ] && help::show "add"
+    [ -z "${_switch}" ] && help_show "add"
 
-    config::load "${VM_DS_PATH}/${_name}/${_name}.conf"
+    config_load "${VM_DS_PATH}/${_name}/${_name}.conf"
 
     while true; do
         _emulation="${_curr}"
-        config::get "_curr" "network${_num}_type"
+        config_get "_curr" "network${_num}_type"
         [ -z "${_curr}" ] && break
         _num=$((_num + 1))
     done
@@ -634,9 +638,9 @@ core::add_network(){
     : ${_emulation:=virtio-net}
 
     # update configuration
-    config::set "${_name}" "network${_num}_type" "${_emulation}"
-    config::set "${_name}" "network${_num}_switch" "${_switch}" "1"
-    [ $? -eq 0 ] || util::err "errors encountered while updating guest configuration"
+    config_set "${_name}" "network${_num}_type" "${_emulation}"
+    config_set "${_name}" "network${_num}_switch" "${_switch}" "1"
+    [ $? -eq 0 ] || util_err "errors encountered while updating guest configuration"
 }
 
 # 'vm install'
@@ -645,27 +649,27 @@ core::add_network(){
 # @param string _name the guest to install to
 # @param string _iso the iso file in $vm_dir/.iso to use
 #
-core::install(){
+core_install(){
     local _name _iso _fulliso
 
-    cmd::parse_args "$@"
+    cmd_parse_args "$@"
     shift $?
     _name="$1"
     _iso="$2"
 
-    [ -z "${_name}" -o -z "${_iso}" ] && help::show "install"
+    [ -z "${_name}" -o -z "${_iso}" ] && help_show "install"
 
     # just run start with an iso
-    datastore::iso_find "_fulliso" "${_iso}" || util::err "unable to locate iso file - '${_iso}'"
-    core::__start "${_name}" "${_fulliso}"
+    datastore_iso_find "_fulliso" "${_iso}" || util_err "unable to locate iso file - '${_iso}'"
+    core___start "${_name}" "${_fulliso}"
 }
 
 # 'vm startall'
 # start all virtual machines listed in rc.conf:$vm_list
 #
-core::startall(){
+core_startall(){
     [ -z "${vm_list}" ] && exit
-    core::start ${vm_list}
+    core_start ${vm_list}
 }
 
 # 'vm stopall'
@@ -676,7 +680,7 @@ core::startall(){
 #
 # stop all running virtual machines
 #
-core::stopall(){
+core_stopall(){
     local _running
     local _stop_parallel
     local _stop_list
@@ -684,7 +688,7 @@ core::stopall(){
     local _curr
     local _done
 
-    cmd::parse_args "$@"
+    cmd_parse_args "$@"
     : ${vm_delay:=2}
 
     #
@@ -747,13 +751,13 @@ core::stopall(){
     #
     # Stop unordered VMs in parallel - each one gets its own graceful
     # ACPI powerdown (with SIGTERM/SIGKILL escalation) via
-    # core::__stop_one, running in the background.
+    # core___stop_one, running in the background.
     #
     if [ -n "${_stop_parallel}" ]; then
         echo "  * parallel shutdown of non-ordered guests: ${_stop_parallel}"
 
         for _curr in ${_stop_parallel}; do
-            core::__stop_one "${_curr}" &
+            core___stop_one "${_curr}" &
         done
 
         wait
@@ -766,7 +770,7 @@ core::stopall(){
         for _curr in ${_stop_list}; do
             [ -n "${_done}" ] && echo "  * waiting ${vm_delay} second(s)" && sleep "${vm_delay}"
             echo "  * stopping ${_curr}"
-            core::__stop_one "${_curr}"
+            core___stop_one "${_curr}"
             _done="1"
         done
     fi
@@ -781,12 +785,12 @@ core::stopall(){
 # as it cannot determine where to save the state file for instances
 # started by other tools.
 #
-core::suspendall()
+core_suspendall()
 {
     local _stop_parallel _stop_list _running _list_rev _curr
     local _ds _n _p
 
-    cmd::parse_args "$@"
+    cmd_parse_args "$@"
     : ${vm_delay:=2}
 
     #
@@ -798,10 +802,10 @@ core::suspendall()
     #
     _running=$(
         for _ds in ${VM_DATASTORE_LIST}; do
-            datastore::get "${_ds}" || continue
+            datastore_get "${_ds}" || continue
             ls -1 "${VM_DS_PATH}" 2>/dev/null
         done | sort -u | while read -r _n; do
-            _p=$(vm::getpid "${_n}")
+            _p=$(vm_getpid "${_n}")
             [ -n "${_p}" ] && kill -0 "${_p}" 2>/dev/null && echo "${_n}"
         done | tr '\n' ' '
     )
@@ -841,7 +845,7 @@ core::suspendall()
         echo "  * parallel suspend of non-ordered guests: ${_stop_parallel}"
         for _curr in ${_stop_parallel}; do
             echo "  * suspending ${_curr}"
-            core::suspend "${_curr}" >/dev/null 2>&1
+            core_suspend "${_curr}" >/dev/null 2>&1
         done
     fi
 
@@ -850,7 +854,7 @@ core::suspendall()
         for _curr in ${_stop_list}; do
             echo "  * waiting ${vm_delay} second(s)" && sleep ${vm_delay}
             echo "  * suspending ${_curr}"
-            core::suspend "${_curr}" >/dev/null 2>&1
+            core_suspend "${_curr}" >/dev/null 2>&1
         done
     fi
 
@@ -862,16 +866,16 @@ core::suspendall()
 #
 # @param string[multiple] _name the name of the guest(s) to start
 #
-core::start(){
+core_start(){
     local _name
     local _done
     local _rc _rcsum=0
 
-    cmd::parse_args "$@"
+    cmd_parse_args "$@"
     shift $?
     _name="$1"
 
-    [ -z "${_name}" ] && help::show "start"
+    [ -z "${_name}" ] && help_show "start"
     : ${vm_delay:=2}
 
     # disable foreground/interactive if we're starting more than one
@@ -882,7 +886,7 @@ core::start(){
 
     while [ -n "${_name}" ]; do
         [ -n "${_done}" ] && echo "Waiting ${vm_delay} second(s)" && sleep ${vm_delay}
-        core::__start "${_name}"
+        core___start "${_name}"
 
         _rc=$?
         if [ ${_rc} -ne 0 ]; then
@@ -903,18 +907,18 @@ core::start(){
 # @param string _name the name of the guest to start
 # @param optional string _iso iso file is this is an install (can only be provided through 'vm install' command)
 #
-core::__start(){
+core___start(){
     local _name="$1"
     local _iso="$2"
     local _cpu _memory _disk _guest _loader _console
     local _tmux_cmd _tmux_name _util _uefi
 
-    [ -z "${_name}" ] && util::usage
+    [ -z "${_name}" ] && util_usage
 
     echo "Starting ${_name}"
 
     # try to find guest
-    if ! datastore::get_guest "${_name}"; then
+    if ! datastore_get_guest "${_name}"; then
         echo "  ! ${_name} does not seem to be a valid virtual machine"
         return 1
     fi
@@ -922,16 +926,16 @@ core::__start(){
     echo "  * found guest in ${VM_DS_PATH}/${_name}"
 
     # confirm we aren't running
-    if ! vm::confirm_stopped "${_name}" "1" >/dev/null 2>&1; then
+    if ! vm_confirm_stopped "${_name}" "1" >/dev/null 2>&1; then
         echo "  ! guest appears to be running already"
         return 1
     fi
 
     # check basic settings before going into background mode
-    config::load "${VM_DS_PATH}/${_name}/${_name}.conf"
-    config::get "_cpu" "cpu"
-    config::get "_memory" "memory"
-    config::get "_loader" "loader"
+    config_load "${VM_DS_PATH}/${_name}/${_name}.conf"
+    config_get "_cpu" "cpu"
+    config_get "_memory" "memory"
+    config_get "_loader" "loader"
 
     # check minimum configuration
     if [ -z "${_cpu}" -o -z "${_memory}" ]; then
@@ -940,7 +944,7 @@ core::__start(){
     fi
 
     # check for tmux
-    config::core::get "_console" "console" "stdio"
+    config_core_get "_console" "console" "stdio"
     _tmux_cmd=$(which tmux)
 
     if [ "${_console}" = "tmux" -a -z "${_tmux_cmd}" ]; then
@@ -948,7 +952,7 @@ core::__start(){
         return 1
     fi
 
-    if util::check_bhyve_suspend >/dev/null 2>&1 && vm::has_saved_state "${_name}"; then
+    if util_check_bhyve_suspend >/dev/null 2>&1 && vm_has_saved_state "${_name}"; then
         echo "  * found saved vm state, resuming..."
     else
         echo "  * booting..."
@@ -974,7 +978,7 @@ core::__start(){
         # interactive && console != tmux
         # connect to the console using cu if global console setting not set to tmux
         $0 _run "${_name}" "${_iso}" >/dev/null 2>&1 &
-        core::console -w "${_name}"
+        core_console -w "${_name}"
     else
         $0 _run "${_name}" "${_iso}" >/dev/null 2>&1 &
     fi
@@ -986,13 +990,13 @@ core::__start(){
 #
 # @param string _name name of the guest to restart
 #
-core::restart(){
+core_restart(){
     local _name="$1"
 
-    datastore::get_guest "${_name}" || util::err "unable to locate specified guest"
+    datastore_get_guest "${_name}" || util_err "unable to locate specified guest"
     echo "Setting guest restart flag"
     touch "${VM_DS_PATH}/${_name}/restart" >/dev/null 2>&1
-    core::stop "${_name}"
+    core_stop "${_name}"
 }
 
 # 'vm stop'
@@ -1000,12 +1004,12 @@ core::restart(){
 #
 # @param string[multiple] _name name of the guest to stop
 #
-core::stop(){
+core_stop(){
     local _name="$1"
-    [ -z "${_name}" ] && help::show "stop"
+    [ -z "${_name}" ] && help_show "stop"
 
     while [ -n "${_name}" ]; do
-        core::__stop_one "${_name}"
+        core___stop_one "${_name}"
         shift
         _name="$1"
     done
@@ -1019,14 +1023,14 @@ core::stop(){
 # @private
 # @param string _name name of the guest to stop
 #
-core::__stop_one(){
+core___stop_one(){
     local _name="$1"
     local _pid
 
-    _pid=$(vm::getpid "${_name}")
+    _pid=$(vm_getpid "${_name}")
 
     if [ -z "${_pid}" ] || ! kill -0 "${_pid}" 2>/dev/null; then
-        util::warn "${_name} doesn't appear to be a running virtual machine"
+        util_warn "${_name} doesn't appear to be a running virtual machine"
         return 1
     fi
 
@@ -1035,33 +1039,33 @@ core::__stop_one(){
     echo "Sending ACPI shutdown to ${_name}"
 
     if [ -S "${VM_DS_PATH}/${_name}/${_name}.qmp" ]; then
-        qemu::qmp "${_name}" '{"execute":"system_powerdown"}' >/dev/null 2>&1
+        qemu_qmp "${_name}" '{"execute":"system_powerdown"}' >/dev/null 2>&1
     else
         # no QMP socket available - fall back to a plain SIGTERM
         kill -TERM "${_pid}" >/dev/null 2>&1
     fi
 
     # give the guest OS a chance to shut down cleanly on its own
-    if ! qemu::wait_exit "${_pid}" "${vm_stop_timeout}"; then
-        util::warn "${_name} did not shut down within ${vm_stop_timeout}s, forcing stop"
+    if ! qemu_wait_exit "${_pid}" "${vm_stop_timeout}"; then
+        util_warn "${_name} did not shut down within ${vm_stop_timeout}s, forcing stop"
         kill -TERM "${_pid}" >/dev/null 2>&1
-        qemu::wait_exit "${_pid}" 5 || kill -KILL "${_pid}" >/dev/null 2>&1
+        qemu_wait_exit "${_pid}" 5 || kill -KILL "${_pid}" >/dev/null 2>&1
     fi
 
     # remove saved vm state after normal shutdown
-    core::discard -f "${_name}" >/dev/null 2>&1
+    core_discard -f "${_name}" >/dev/null 2>&1
 }
 
-core::suspend(){
+core_suspend(){
     local _name="$1"
-    [ -z "${_name}" ] && help::show "suspend"
-    datastore::get_guest "${_name}" || \
-        util::err "${_name} doesn't appear to be a valid virtual machine"
-    vm::confirm_running "${_name}" || \
-        util::err "${_name} doesn't appear to be a running virtual machine"
+    [ -z "${_name}" ] && help_show "suspend"
+    datastore_get_guest "${_name}" || \
+        util_err "${_name} doesn't appear to be a valid virtual machine"
+    vm_confirm_running "${_name}" || \
+        util_err "${_name} doesn't appear to be a running virtual machine"
     echo "Suspending ${_name}"
     hostname > "${VM_DS_PATH}/${_name}/suspending.lock"
-    qemu::qmp "${_name}" \
+    qemu_qmp "${_name}" \
         "{\"execute\":\"migrate\",\"arguments\":{\"uri\":\"file:${VM_DS_PATH}/${_name}/${_name}.save\"}}"
 }
 
@@ -1072,19 +1076,19 @@ core::suspend(){
 #
 # @param string _name name of the guest
 #
-core::reset(){
+core_reset(){
     local _name
-    cmd::parse_args "$@"
+    cmd_parse_args "$@"
     shift $?
     _name="$1"
-    [ -z "${_name}" ] && help::show "reset"
-    vm::confirm_running "${_name}" || \
-        util::err "${_name} doesn't appear to be a running virtual machine"
+    [ -z "${_name}" ] && help_show "reset"
+    vm_confirm_running "${_name}" || \
+        util_err "${_name} doesn't appear to be a running virtual machine"
 
     if [ -z "${VM_OPT_FORCE}" ]; then
-        util::confirm "Are you sure you want to forcefully reset this virtual machine" || exit 0
+        util_confirm "Are you sure you want to forcefully reset this virtual machine" || exit 0
     fi
-    qemu::qmp "${_name}" '{"execute":"system_reset"}'
+    qemu_qmp "${_name}" '{"execute":"system_reset"}'
 }
 
 # 'vm poweroff'
@@ -1092,20 +1096,20 @@ core::reset(){
 #
 # @param string _name name of the guest
 #
-core::poweroff(){
+core_poweroff(){
     local _name
-    cmd::parse_args "$@"
+    cmd_parse_args "$@"
     shift $?
     _name="$1"
-    [ -z "${_name}" ] && help::show "poweroff"
-    vm::confirm_running "${_name}" || \
-        util::err "${_name} doesn't appear to be a running virtual machine"
+    [ -z "${_name}" ] && help_show "poweroff"
+    vm_confirm_running "${_name}" || \
+        util_err "${_name} doesn't appear to be a running virtual machine"
     if [ -z "${VM_OPT_FORCE}" ]; then
-        util::confirm "Are you sure you want to forcefully poweroff this virtual machine" || exit 0
+        util_confirm "Are you sure you want to forcefully poweroff this virtual machine" || exit 0
     fi
-    qemu::qmp "${_name}" '{"execute":"quit"}'
+    qemu_qmp "${_name}" '{"execute":"quit"}'
     # remove saved vm state on forceful poweroff
-    core::discard -f "${_name}"
+    core_discard -f "${_name}"
 }
 
 # 'vm destroy'
@@ -1113,32 +1117,32 @@ core::poweroff(){
 #
 # @param string _name name of the guest
 #
-core::destroy(){
+core_destroy(){
     local _name
 
-    cmd::parse_args "$@"
+    cmd_parse_args "$@"
     shift $?
     _name="$1"
 
-    [ -z "${_name}" ] && help::show "destroy"
+    [ -z "${_name}" ] && help_show "destroy"
 
     # trying to remove a snapshot?
     echo "${_name}" | grep -qs "@"
 
     if [ $? -eq 0 ]; then
-        zfs::remove_snapshot "${_name}"
+        zfs_remove_snapshot "${_name}"
         exit $?
     fi
 
     # make sure it's stopped!
-    datastore::get_guest "${_name}" || util::err "${_name} doesn't appear to be a valid virtual machine"
-    vm::confirm_stopped "${_name}" || exit 1
+    datastore_get_guest "${_name}" || util_err "${_name} doesn't appear to be a valid virtual machine"
+    vm_confirm_stopped "${_name}" || exit 1
 
     if [ -z "${VM_OPT_FORCE}" ]; then
-        util::confirm "Are you sure you want to completely remove this virtual machine" || exit 0
+        util_confirm "Are you sure you want to completely remove this virtual machine" || exit 0
     fi
 
-    [ -n "${VM_DS_ZFS_DATASET}" ] && zfs::destroy_dataset "${VM_DS_ZFS_DATASET:?}/${_name:?}"
+    [ -n "${VM_DS_ZFS_DATASET}" ] && zfs_destroy_dataset "${VM_DS_ZFS_DATASET:?}/${_name:?}"
     [ -e "${VM_DS_PATH}/${_name}" ] && rm -R "${VM_DS_PATH:?}/${_name:?}"
 
     exit 0
@@ -1149,27 +1153,27 @@ core::destroy(){
 #
 # @param string _name name of the guest
 #
-core::discard(){
+core_discard(){
     local _name _rc=0
 
-    cmd::parse_args "$@"
+    cmd_parse_args "$@"
     shift $?
     _name="$1"
 
-    [ -z "${_name}" ] && help::show "discard"
+    [ -z "${_name}" ] && help_show "discard"
 
-    # core::discard only accepts one target guest
-    [ ! -z "$2" ] && help::show "discard"
+    # core_discard only accepts one target guest
+    [ ! -z "$2" ] && help_show "discard"
 
-    datastore::get_guest "${_name}" || util::err "${_name} doesn't appear to be a valid virtual machine"
+    datastore_get_guest "${_name}" || util_err "${_name} doesn't appear to be a valid virtual machine"
 
     if [ -z "${VM_OPT_FORCE}" ]; then
-        util::confirm "Are you sure you want to remove the saved state of this virtual machine" || exit 0
+        util_confirm "Are you sure you want to remove the saved state of this virtual machine" || exit 0
     fi
 
-    if ! vm::has_saved_state "${_name}"; then
+    if ! vm_has_saved_state "${_name}"; then
         if [ -z "${VM_OPT_FORCE}" ]; then
-            util::err "no saved state exists for ${_name}"
+            util_err "no saved state exists for ${_name}"
         else
             # When VM_OPT_FORCE is set, do not error if no saved state exists
             return 0
@@ -1188,32 +1192,32 @@ core::discard(){
 # @param string _old the existing guest name
 # @param string _new the new guest name
 #
-core::rename(){
+core_rename(){
     local _old="$1"
     local _new="$2"
     local _mv_failed
 
-    [ -z "${_old}" -o -z "${_new}" ] && help::show "rename"
-    util::check_name "${_new}" || util::err "invalid virtual machine name - '${_name}'"
+    [ -z "${_old}" -o -z "${_new}" ] && help_show "rename"
+    util_check_name "${_new}" || util_err "invalid virtual machine name - '${_name}'"
 
-    datastore::get_guest "${_new}" && util::err "directory ${VM_DS_PATH}/${_new} already exists"
-    datastore::get_guest "${_old}" || util::err "${_old} doesn't appear to be a valid virtual machine"
+    datastore_get_guest "${_new}" && util_err "directory ${VM_DS_PATH}/${_new} already exists"
+    datastore_get_guest "${_old}" || util_err "${_old} doesn't appear to be a valid virtual machine"
 
     # confirm guest stopped
-    vm::confirm_stopped "${_old}" || exit 1
+    vm_confirm_stopped "${_old}" || exit 1
 
     # rename zfs dataset
-    zfs::rename_dataset "${_old}" "${_new}"
+    zfs_rename_dataset "${_old}" "${_new}"
 
     # rename folder if it still exists (shouldn't if zfs mode and rename worked)
     if [ -d "${VM_DS_PATH}/${_old}" ]; then
         mv "${VM_DS_PATH}/${_old}" "${VM_DS_PATH}/${_new}" >/dev/null 2>&1
-        [ $? -eq 0 ] || util::err "failed to rename guest directory"
+        [ $? -eq 0 ] || util_err "failed to rename guest directory"
     fi
 
     # rename config file
     mv "${VM_DS_PATH}/${_new}/${_old}.conf" "${VM_DS_PATH}/${_new}/${_new}.conf" >/dev/null 2>&1
-    [ $? -eq 0 ] || util::err "changed guest directory but failed to rename configuration file"
+    [ $? -eq 0 ] || util_err "changed guest directory but failed to rename configuration file"
 
     # rename saved vm state file
     _mv_failed=0
@@ -1224,7 +1228,7 @@ core::rename(){
             echo mv "${oldf} ${newf}" || _mv_failed=1
         done
     )
-    [ "${_mv_failed}" -eq 0 ] || util::err "changed guest directory but failed to rename saved vm state file"
+    [ "${_mv_failed}" -eq 0 ] || util_err "changed guest directory but failed to rename saved vm state file"
 }
 
 # 'vm console'
@@ -1237,14 +1241,14 @@ core::rename(){
 # @param string _name name of the guest
 # @param string _port the port to connect to (default = first in configuration)
 #
-core::console(){
+core_console(){
     local _name _port
     local _console _tmux _tmux_cmd _wait_for_vm _pid
 
     while getopts w _opt ; do
         case $_opt in
             w) _wait_for_vm="1" ;;
-            *) help::show "console" ;;
+            *) help_show "console" ;;
         esac
     done
 
@@ -1253,23 +1257,23 @@ core::console(){
     _name="$1"
     _port="$2"
 
-    [ -z "${_name}" ] && help::show "console"
+    [ -z "${_name}" ] && help_show "console"
 
-    datastore::get_guest "${_name}" || util::err "${_name} doesn't appear to be a valid virtual machine"
+    datastore_get_guest "${_name}" || util_err "${_name} doesn't appear to be a valid virtual machine"
 
     if [ -n "${_wait_for_vm}" ]; then
         echo "Waiting for ${_name} to start..."
         # wait for the pid file to appear and the process to be alive
         sleep 0.05
         while true; do
-            _pid=$(vm::getpid "${_name}")
+            _pid=$(vm_getpid "${_name}")
             [ -n "${_pid}" ] && kill -0 "${_pid}" 2>/dev/null && break
             sleep 1
         done
     else
-        _pid=$(vm::getpid "${_name}")
+        _pid=$(vm_getpid "${_name}")
         if [ -z "${_pid}" ] || ! kill -0 "${_pid}" 2>/dev/null; then
-            util::err "${_name} doesn't appear to be a running virtual machine"
+            util_err "${_name} doesn't appear to be a running virtual machine"
         fi
     fi
 
@@ -1298,7 +1302,7 @@ core::console(){
         fi
     fi
 
-    [ -z "${_console}" ] && util::err "unable to locate console device for this virtual machine"
+    [ -z "${_console}" ] && util_err "unable to locate console device for this virtual machine"
     socat -,raw,echo=0 UNIX-CONNECT:"${_console}"
 }
 
@@ -1307,22 +1311,22 @@ core::console(){
 #
 # @param string _name name of the guest
 #
-core::configure(){
+core_configure(){
     local _name="$1"
     local _target="$2"
 
-    [ -z "${_name}" ] && help::show "configure"
+    [ -z "${_name}" ] && help_show "configure"
     [ -z "${EDITOR}" ] && EDITOR="vi"
 
-    datastore::get_guest "${_name}" || \
-        util::err "cannot locate configuration file for virtual machine: ${_name}"
+    datastore_get_guest "${_name}" || \
+        util_err "cannot locate configuration file for virtual machine: ${_name}"
 
     case "$_target" in
         meta-data|network-config|user-data)
             [ -d "${VM_DS_PATH}/${_name}/.cloud-init" ] || \
-                util::err "cloud-init is not enabled for this guest"
+                util_err "cloud-init is not enabled for this guest"
             if [ -e "${VM_DS_PATH}/${_name}/seed.iso" ]; then
-                util::confirm "cloud-init has run already. changes won't take effect. edit anyway?" || exit 0
+                util_confirm "cloud-init has run already. changes won't take effect. edit anyway?" || exit 0
             fi
 
             $EDITOR "${VM_DS_PATH}/${_name}/.cloud-init/${_target}"
@@ -1331,7 +1335,7 @@ core::configure(){
             $EDITOR "${VM_DS_PATH}/${_name}/${_name}.conf"
             ;;
         *)
-            help::show "configure"
+            help_show "configure"
             ;;
     esac
 }
@@ -1341,7 +1345,7 @@ core::configure(){
 #
 # @param string _url if specified, the url will be fetch'ed into $vm_dir/.iso
 #
-core::iso(){
+core_iso(){
     local _url _ds="default" _filename
     local _fetch_opts
 
@@ -1350,7 +1354,7 @@ core::iso(){
             4) _fetch_opts="${_fetch_opts} -4" ;;
             6) _fetch_opts="${_fetch_opts} -6" ;;
             d) _ds=${OPTARG} ;;
-            *) help::show "iso" ;;
+            *) help_show "iso" ;;
         esac
     done
 
@@ -1358,7 +1362,7 @@ core::iso(){
     _url=$1
 
     if [ -n "${_url}" ]; then
-        datastore::get_iso "${_ds}" || util::err "unable to locate path for datastore '${_ds}'"
+        datastore_get_iso "${_ds}" || util_err "unable to locate path for datastore '${_ds}'"
         # converted from Fetch to Curl
 	_filename=$(basename "${_url}")
 	case "${_fetch_opts}" in
@@ -1373,11 +1377,11 @@ core::iso(){
         	;;
 	esac
 	curl -L ${_curl_opts} -o "${VM_DS_PATH}/${_filename}" "${_url}" || \
-	    util::err "failed to download ISO image"
+	    util_err "failed to download ISO image"
 
-	core::decompress "${VM_DS_PATH}/${_filename}"
+	core_decompress "${VM_DS_PATH}/${_filename}"
     else
-        datastore::iso_list
+        datastore_iso_list
     fi
 }
 
@@ -1386,10 +1390,10 @@ core::iso(){
 # @private
 # @param string _filepath path to file to decompress
 #
-core::decompress(){
+core_decompress(){
     local _filepath
 
-    cmd::parse_args "$@"
+    cmd_parse_args "$@"
     shift $?
     _filepath="${1}"
 
@@ -1408,11 +1412,11 @@ core::decompress(){
 #
 # @param string _url if specified, the url will be fetch'ed into $vm_dir/.img
 #
-core::img(){
+core_img(){
     local _url _ds="default" _filename
     local _fetch_opts
     if ! which qemu-img > /dev/null; then
-        util::err "Error: qemu-img is required to work with cloud images! Run 'pkg install qemu-tools'."
+        util_err "Error: qemu-img is required to work with cloud images! Run 'pkg install qemu-tools'."
     fi
 
     while getopts 46d:u _opt ; do
@@ -1420,7 +1424,7 @@ core::img(){
             4) _fetch_opts="${_fetch_opts} -4" ;;
             6) _fetch_opts="${_fetch_opts} -6" ;;
             d) _ds=${OPTARG} ;;
-            *) help::show "img" ;;
+            *) help_show "img" ;;
         esac
     done
 
@@ -1428,7 +1432,7 @@ core::img(){
     _url=$1
 
     if [ -n "${_url}" ]; then
-        datastore::get_img "${_ds}" || util::err "unable to locate path for datastore '${_ds}'"
+        datastore_get_img "${_ds}" || util_err "unable to locate path for datastore '${_ds}'"
         _filename=$(basename "${_url}")
         # converted from Fetch to Curl
 	case "${_fetch_opts}" in
@@ -1443,10 +1447,10 @@ core::img(){
         	;;
 	esac
 	curl -L ${_curl_opts} -o "${VM_DS_PATH}/${_filename}" "${_url}" || \
-	    util::err "failed to download cloud image"
-	core::decompress "${VM_DS_PATH}/${_filename}"
+	    util_err "failed to download cloud image"
+	core_decompress "${VM_DS_PATH}/${_filename}"
     else
-        datastore::img_list
+        datastore_img_list
     fi
 }
 
@@ -1454,7 +1458,7 @@ core::img(){
 # show a list of available passthrough devices
 # and their device number
 #
-core::passthru(){
+core_passthru(){
     local _dev _sbf _desc _ready
     local _format="%-12s %-12s %-8s %s\n"
     printf "${_format}" "DEVICE" "PCI ID" "READY" "DESCRIPTION"
@@ -1482,7 +1486,7 @@ core::passthru(){
 # 'vm get'
 # get a core configuration setting
 #
-core::get(){
+core_get(){
     local _var="$1"
     local _val _format="%-20s%s\n"
     local IFS=";"
@@ -1492,13 +1496,13 @@ core::get(){
     if [ "${_var}" = "all" ]; then
 
         for _var in ${VM_CONFIG_USER}; do
-            config::core::get "_val" "${_var}"
+            config_core_get "_val" "${_var}"
             printf "${_format}" "${_var}" "${_val:--}"
         done
     else
         while [ -n "${_var}" ]; do
-            if util::valid_config_setting "${_var}"; then
-                config::core::get "_val" "${_var}"
+            if util_valid_config_setting "${_var}"; then
+                config_core_get "_val" "${_var}"
                 printf "${_format}" "${_var}" "${_val:--}"
             fi
 
@@ -1511,7 +1515,7 @@ core::get(){
 # 'vm set'
 # set a core configuration setting
 #
-core::set(){
+core_set(){
     local _pair="$1"
     local _key _val
 
@@ -1519,10 +1523,10 @@ core::set(){
         _key="${_pair%%=*}"
         _val="${_pair#*=}"
 
-        if util::valid_config_setting "${_key}"; then
-            config::core::set "${_key}" "${_val}"
+        if util_valid_config_setting "${_key}"; then
+            config_core_set "${_key}" "${_val}"
         else
-            util::err "invalid configuration setting - '${_key}'"
+            util_err "invalid configuration setting - '${_key}'"
         fi
 
         shift

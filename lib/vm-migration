@@ -8,7 +8,7 @@
 # @param string name the guest to send
 # @param string host host to send guest to
 #
-migration::run(){
+migration_run(){
     local _name
     local _ds="default"
     local _start="1"
@@ -39,43 +39,43 @@ migration::run(){
     # do we want to output our config?
     # sender uses the config option to pull config from the receive end
     if [ -n "${_config}" ]; then
-        migration::__check_config "${_ds}"
+        migration___check_config "${_ds}"
         exit
     fi
 
     # basic checks
-    [ -z "${_name}" -o -z "${_host}" ] && util::usage
-    datastore::get_guest "${_name}" || util::err "unable to locate guest - '${_name}'"
-    [ -z "${VM_DS_ZFS}" ] && util::err "the source datastore must be ZFS to support migration"
-    [ -n "${_stage}" -a -n "${_triple}" ] && util::err "single stage and triple stage are mutually exclusive"
-    [ "${_stage}" = "2" -a -z "${_inc}" ] && util::err "source snapshot must be given when running stage 2"
+    [ -z "${_name}" -o -z "${_host}" ] && util_usage
+    datastore_get_guest "${_name}" || util_err "unable to locate guest - '${_name}'"
+    [ -z "${VM_DS_ZFS}" ] && util_err "the source datastore must be ZFS to support migration"
+    [ -n "${_stage}" -a -n "${_triple}" ] && util_err "single stage and triple stage are mutually exclusive"
+    [ "${_stage}" = "2" -a -z "${_inc}" ] && util_err "source snapshot must be given when running stage 2"
 
     if [ -n "${_rname}" ]; then
-        util::check_name "${_rname}" || util::err "invalid virtual machine name - '${_rname}'"
+        util_check_name "${_rname}" || util_err "invalid virtual machine name - '${_rname}'"
         _renaming="1"
     else
         _rname="${_name}"
     fi
 
     # check guest can be sent
-    config::load "${VM_DS_PATH}/${_name}/${_name}.conf"
-    migration::__check_compat
+    config_load "${VM_DS_PATH}/${_name}/${_name}.conf"
+    migration___check_compat
 
     # check running state
-    vm::confirm_stopped "${_name}" "1" >/dev/null 2>&1
+    vm_confirm_stopped "${_name}" "1" >/dev/null 2>&1
     _state=$?
-    [ ${_state} -eq 2 ] && util::err "guest is powered up on another host"
+    [ ${_state} -eq 2 ] && util_err "guest is powered up on another host"
     [ ${_state} -eq 1 ] && _running="1"
 
     # try to get pid
     if [ -n "${_running}" ]; then
-        _pid=$(vm::getpid "${_name}")
-        [ -z "${_pid}" ] && util::err "guest seems to be running but can't find its pid"
+        _pid=$(vm_getpid "${_name}")
+        [ -z "${_pid}" ] && util_err "guest seems to be running but can't find its pid"
     fi
 
     # try to get remote config
     _rdataset=$(ssh "${_host}" vm migrate -cd "${_ds}" 2>/dev/null)
-    [ $? = "1" -o -z "${_rdataset}" ] && util::err "unable to get config from ${_host}"
+    [ $? = "1" -o -z "${_rdataset}" ] && util_err "unable to get config from ${_host}"
 
     echo "Attempting to send ${_name} to ${_host}"
     echo "  * remote dataset ${_rdataset}/${_rname}"
@@ -87,10 +87,10 @@ migration::run(){
         _snap1="$(date +'%Y%m%d%H%M%S-s1')"
         echo "  * stage 1: taking snapshot ${_snap1}"
         zfs snapshot -r "${VM_DS_ZFS_DATASET}/${_name}@${_snap1}" >/dev/null 2>&1
-        [ $? -eq 0 ] || util::err_inline "error taking local snapshot"
+        [ $? -eq 0 ] || util_err_inline "error taking local snapshot"
 
         # send this snapshot
-        migrate::__send "1" "${_snap1}" "${_inc}"
+        migrate___send "1" "${_snap1}" "${_inc}"
     fi
 
     # STAGE 1B
@@ -101,10 +101,10 @@ migration::run(){
         _snap2="$(date +'%Y%m%d%H%M%S-s1b')"
         echo "  * stage 1b: taking snapshot ${_snap2}"
         zfs snapshot -r "${VM_DS_ZFS_DATASET}/${_name}@${_snap2}" >/dev/null 2>&1
-        [ $? -eq 0 ] || util::err_inline "error taking local snapshot"
+        [ $? -eq 0 ] || util_err_inline "error taking local snapshot"
 
         # send this snapshot
-        migrate::__send "1b" "${_snap2}" "${_snap1}"
+        migrate___send "1b" "${_snap2}" "${_snap1}"
     fi
 
     # only running first stage
@@ -114,19 +114,19 @@ migration::run(){
     fi
 
     # if it's running we now need to stop it.
-    # Linux/QEMU: reuse core::stop rather than a raw kill+poll loop here -
+    # Linux/QEMU: reuse core_stop rather than a raw kill+poll loop here -
     # it already does a graceful QMP ACPI shutdown with a sane timeout
     # before escalating, which is what we actually want mid-migration
     # too (a hard kill risks an unclean guest filesystem on the disk
     # we're about to send).
     if [ -n "${_running}" ]; then
         echo "  * stage 2: stopping guest"
-        core::stop "${_name}"
+        core_stop "${_name}"
     fi
 
     # has it stopped?
-    _pid=$(vm::getpid "${_name}")
-    [ -n "${_pid}" ] && kill -0 "${_pid}" 2>/dev/null && util::err_inline "failed to stop guest"
+    _pid=$(vm_getpid "${_name}")
+    [ -n "${_pid}" ] && kill -0 "${_pid}" 2>/dev/null && util_err_inline "failed to stop guest"
     echo "  * stage 2: guest powered off"
 
     # only needed if running or specifically doing a stage 2
@@ -134,20 +134,20 @@ migration::run(){
         _snap3="$(date +'%Y%m%d%H%M%S-s2')"
         echo "  * stage 2: taking snapshot ${_snap3}"
         zfs snapshot -r "${VM_DS_ZFS_DATASET}/${_name}@${_snap3}" >/dev/null 2>&1
-        [ $? -eq 0 ] || util::err_inline "error taking local snapshot"
+        [ $? -eq 0 ] || util_err_inline "error taking local snapshot"
 
         # send this snapshot
         if [ "${_triple}" = "1" ]; then
-            migrate::__send "2" "${_snap3}" "${_snap2}"
+            migrate___send "2" "${_snap3}" "${_snap2}"
         elif [ "${_stage}" = "2" ]; then
-            migrate::__send "2" "${_snap3}" "${_inc}"
+            migrate___send "2" "${_snap3}" "${_inc}"
         else
-            migrate::__send "2" "${_snap3}" "${_snap1}"
+            migrate___send "2" "${_snap3}" "${_snap1}"
         fi
     fi
 
     # do we need to rename?
-    [ "${_renaming}" = "1" ] && migrate::__rename_config
+    [ "${_renaming}" = "1" ] && migrate___rename_config
 
     # start
     if [ -n "${_start}" -a -n "${_running}" ]; then
@@ -171,7 +171,7 @@ migration::run(){
 # updates the config file for a renamed guest
 # god knows why I didn't just use "guest.conf"
 #
-migrate::__rename_config(){
+migrate___rename_config(){
     local _path
 
     # we need the mount path first.
@@ -196,7 +196,7 @@ migrate::__rename_config(){
     fi
 }
 
-migrate::__send(){
+migrate___send(){
     local _stage="$1"
     local _snap="$2"
     local _inc="$3"
@@ -210,7 +210,7 @@ migrate::__send(){
         zfs send -R "${VM_DS_ZFS_DATASET}/${_name}@${_snap}" | ssh ${_host} zfs recv "${_rdataset}/${_rname}"
     fi
 
-    [ $? -eq 0 ] || util::err_inline "error detected while sending snapshot"
+    [ $? -eq 0 ] || util_err_inline "error detected while sending snapshot"
     echo "  * stage ${_stage}: snapshot sent"
 }
 
@@ -219,10 +219,10 @@ migrate::__send(){
 #
 # @param string _ds the datastore to get details of
 #
-migration::__check_config(){
+migration___check_config(){
     local _ds="$1"
 
-    datastore::get "${_ds}"
+    datastore_get "${_ds}"
     [ -z "${VM_DS_ZFS}" ] && exit 1
 
     # output the datastore dataset
@@ -234,22 +234,22 @@ migration::__check_config(){
 # there are a few guest settings that are likely to
 # cause the guest to break if it's moved to another host
 #
-migration::__check_compat(){
+migration___check_compat(){
     local _setting _err _num=0
 
     # check pass through
-    config::get "_setting" "passthru0"
+    config_get "_setting" "passthru0"
     [ -n "${_setting}" ] && _err="pci pass-through enabled"
 
     # check for custom disks
     # file/zvol are under guest dataset and should go across ok
     # custom disks could be anywhere
     while true; do
-        config::get "_setting" "disk${_num}_type"
+        config_get "_setting" "disk${_num}_type"
         [ -z "${_setting}" ] && break
         [ "${_setting}" = "custom" ] && _err="custom disk(s) configured" && break
         _num=$((_num + 1))
     done
 
-    [ -n "${_err}" ] && util::err "migration is not supported for this guest (${_err})"
+    [ -n "${_err}" ] && util_err "migration is not supported for this guest (${_err})"
 }

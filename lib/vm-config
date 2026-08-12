@@ -3,7 +3,7 @@
 # SPDX-FileCopyrightText: 2016 Matt Churchyard <churchers@gmail.com>
 # SPDX-FileCopyrightText: 2026 Petr Derbyshev <drvpotr@gmail.com>
 
-# portable replacement for FreeBSD /bin/sh's built-in 'config::setvar()'.
+# portable replacement for FreeBSD /bin/sh's built-in 'config_setvar()'.
 # Linux shells (dash, bash, ...) don't have it, so we emulate the
 # same "assign by variable name" behaviour with eval. Used all over
 # this file to write a value into a caller-supplied variable name.
@@ -11,18 +11,18 @@
 # @param string _var name of the variable to set
 # @param string _val value to assign to it
 #
-config::setvar(){
-    local _var="$1"
-    local _value="$2"
+config_setvar(){
+    local __cfg_sv_var="$1"
+    local __cfg_sv_value="$2"
 
     # Escape characters which are special inside double quotes for eval.
-    _value=$(printf '%s' "${_value}" | sed \
+    __cfg_sv_value=$(printf '%s' "${__cfg_sv_value}" | sed \
         -e 's/[\\]/\\&/g' \
         -e 's/"/\\"/g' \
         -e 's/\$/\\$/g' \
         -e 's/`/\\`/g')
 
-    eval "${_var}=\"${_value}\""
+    eval "${__cfg_sv_var}=\"${__cfg_sv_value}\""
 }
 
 # unset a value from guest configuration file
@@ -30,13 +30,13 @@ config::setvar(){
 # @param string _name guest name
 # @param string _key config key to remove
 #
-config::unset(){
+config_unset(){
     local _name="$1"
     local _key="$2"
 
     [ -z "${_name}" -o -z "${_key}" ] && return 1
 
-    config::file_remove \
+    config_file_remove \
         "${VM_DS_PATH}/${_name}/${_name}.conf" \
         "${_key}"
 }
@@ -51,7 +51,7 @@ config::unset(){
 # @param string _key configuration key
 # @param string _value value to set
 #
-config::file_set(){
+config_file_set(){
     local _file="$1"
     local _key="$2"
     local _value="$3"
@@ -102,7 +102,7 @@ config::file_set(){
 # Replaces:
 #   sysrc -inxqf <file> <key>
 #
-config::file_remove(){
+config_file_remove(){
     local _file="$1"
     local _key="$2"
     local _tmp
@@ -129,13 +129,13 @@ config::file_remove(){
 #
 # Values are treated as whitespace-separated lists.
 #
-config::file_append(){
+config_file_append(){
     local _file="$1"
     local _key="$2"
     local _value="$3"
     local _current
 
-    config::load_file_value "_current" "${_file}" "${_key}"
+    config_load_file_value "_current" "${_file}" "${_key}"
 
     if [ -n "${_current}" ]; then
         _current="${_current} ${_value}"
@@ -143,7 +143,7 @@ config::file_append(){
         _current="${_value}"
     fi
 
-    config::file_set "${_file}" "${_key}" "${_current}"
+    config_file_set "${_file}" "${_key}" "${_current}"
 }
 
 # LINUX CHANGE:
@@ -152,7 +152,7 @@ config::file_append(){
 # This replaces the sysrc:
 #   variable-=value
 #
-config::file_remove_value(){
+config_file_remove_value(){
     local _file="$1"
     local _key="$2"
     local _value="$3"
@@ -160,7 +160,7 @@ config::file_remove_value(){
     local _new
     local _item
 
-    config::load_file_value "_current" "${_file}" "${_key}"
+    config_load_file_value "_current" "${_file}" "${_key}"
 
     _new=""
 
@@ -174,44 +174,44 @@ config::file_remove_value(){
         fi
     done
 
-    config::file_set "${_file}" "${_key}" "${_new}"
+    config_file_set "${_file}" "${_key}" "${_new}"
 }
 
 # LINUX CHANGE:
 # Read one raw value from a configuration file.
 #
-# This is used internally by config::file_append() and
-# config::file_remove_value().
+# This is used internally by config_file_append() and
+# config_file_remove_value().
 #
-config::load_file_value(){
-    local _var="$1"
+config_load_file_value(){
+    local __cfg_lfv_var="$1"
     local _file="$2"
     local _key="$3"
     local _line
-    local _value
+    local __cfg_lfv_value
 
     _line=$(grep "^[[:space:]]*${_key}[[:space:]]*=" "${_file}" 2>/dev/null | head -n 1)
 
     if [ -n "${_line}" ]; then
-        _value="${_line#*=}"
+        __cfg_lfv_value="${_line#*=}"
 
         # Remove surrounding whitespace.
-        _value=$(printf '%s' "${_value}" | sed \
+        __cfg_lfv_value=$(printf '%s' "${__cfg_lfv_value}" | sed \
             -e 's/^[[:space:]]*//' \
             -e 's/[[:space:]]*$//')
 
         # Remove surrounding double quotes.
-        case "${_value}" in
+        case "${__cfg_lfv_value}" in
             \"*\")
-                _value="${_value#\"}"
-                _value="${_value%\"}"
+                __cfg_lfv_value="${__cfg_lfv_value#\"}"
+                __cfg_lfv_value="${__cfg_lfv_value%\"}"
                 ;;
         esac
     else
-        _value=""
+        __cfg_lfv_value=""
     fi
 
-    config::setvar "${_var}" "${_value}"
+    config_setvar "${__cfg_lfv_var}" "${__cfg_lfv_value}"
 }
 
 
@@ -225,7 +225,7 @@ config::load_file_value(){
 # @param string _file full path of the file to read
 # @modifies VM_CONFIG
 #
-config::load(){
+config_load(){
     local _file="$1"
 
     # read config file
@@ -241,7 +241,7 @@ config::load(){
 # @param optional string _def default value to return if setting not found
 # @return true if setting found
 #
-config::get(){
+config_get(){
     local _c_var="$1"
     local _c_key="$2"
     local _c_def="$3"
@@ -253,7 +253,7 @@ config::get(){
         if [ "${_c_key}" = "${_c_line%%=*}" ]; then
             # LINUX CHANGE:
             # replaced non-standard setvar
-            config::setvar "${_c_var}" "${_c_line#*=}"
+            config_setvar "${_c_var}" "${_c_line#*=}"
             return 0
         fi
     done
@@ -261,7 +261,7 @@ config::get(){
     # not found
     # LINUX CHANGE:
     # replaced non-standard setvar
-    config::setvar "${_c_var}" "${_c_def}"
+    config_setvar "${_c_var}" "${_c_def}"
     return 1
 }
 
@@ -272,13 +272,13 @@ config::get(){
 # @param string _def default value if config key doesn't exist
 # @return true(0) if set to anything other than no/false/off/0
 #
-config::yesno(){
+config_yesno(){
     local _key="$1"
     local _def="$2"
-    local _value
+    local __cfg_yn_value
 
-    config::get "_value" "${_key}" "${_def}"
-    util::yesno "${_value}"
+    config_get "__cfg_yn_value" "${_key}" "${_def}"
+    util_yesno "${__cfg_yn_value}"
 }
 
 # set a value in guest configuration file
@@ -289,7 +289,7 @@ config::yesno(){
 # @param int _skip_newline_check skip the check for newline
 # @return true if successful
 #
-config::set(){
+config_set(){
     local _name="$1"
     local _key="$2"
     local _value="$3"
@@ -303,20 +303,20 @@ config::set(){
 
     # LINUX CHANGE:
     # replaced FreeBSD sysrc with our shell implementation
-    config::file_set \
+    config_file_set \
         "${VM_DS_PATH}/${_name}/${_name}.conf" \
         "${_key}" \
         "${_value}"
 }
 
 # remove a value from guest config
-config::remove(){
+config_remove(){
     local _name="$1"
     local _key="$2"
 
     # LINUX CHANGE:
     # replaced FreeBSD sysrc with our shell implementation
-    config::file_remove \
+    config_file_remove \
         "${VM_DS_PATH}/${_name}/${_name}.conf" \
         "${_key}"
 }
@@ -325,7 +325,7 @@ config::remove(){
 #
 # @modifies VM_CORE_CONFIG VM_CONFIG_USER
 #
-config::core::load(){
+config_core_load(){
     VM_CONFIG_USER="console;compress;decompress;suspend;"
 
     # check config file exists
@@ -346,7 +346,7 @@ config::core::load(){
 # @param string _c_def default value if not value
 # @return 0 if found
 #
-config::core::get(){
+config_core_get(){
     local _c_var="$1"
     local _c_key="$2"
     local _c_def="$3"
@@ -358,7 +358,7 @@ config::core::get(){
         if [ "${_c_key}" = "${_c_line%%=*}" ]; then
             # LINUX CHANGE:
             # replaced non-standard setvar
-            config::setvar "${_c_var}" "${_c_line#*=}"
+            config_setvar "${_c_var}" "${_c_line#*=}"
             return 0
         fi
     done
@@ -366,7 +366,7 @@ config::core::get(){
     # not found
     # LINUX CHANGE:
     # replaced non-standard setvar
-    config::setvar "${_c_var}" "${_c_def}"
+    config_setvar "${_c_var}" "${_c_def}"
     return 1
 }
 
@@ -376,7 +376,7 @@ config::core::get(){
 # @param string _value new value
 # @param string _append non-empty to append to existing value
 #
-config::core::set(){
+config_core_set(){
     local _var="$1"
     local _value="$2"
     local _append="$3"
@@ -384,12 +384,12 @@ config::core::set(){
     # LINUX CHANGE:
     # replaced FreeBSD sysrc with our shell implementation
     if [ -n "${_append}" ]; then
-        config::file_append \
+        config_file_append \
             "${vm_dir}/.config/system.conf" \
             "${_var}" \
             "${_value}"
     else
-        config::file_set \
+        config_file_set \
             "${vm_dir}/.config/system.conf" \
             "${_var}" \
             "${_value}"
@@ -402,19 +402,19 @@ config::core::set(){
 # @param string _value if non-empty we will try to remove just this value from setting
 # @return non-zero on error
 #
-config::core::remove(){
+config_core_remove(){
     local _var="$1"
     local _value="$2"
 
     # LINUX CHANGE:
     # replaced FreeBSD sysrc with our shell implementation
     if [ -n "${_value}" ]; then
-        config::file_remove_value \
+        config_file_remove_value \
             "${vm_dir}/.config/system.conf" \
             "${_var}" \
             "${_value}"
     else
-        config::file_remove \
+        config_file_remove \
             "${vm_dir}/.config/system.conf" \
             "${_var}"
     fi

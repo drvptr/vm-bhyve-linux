@@ -14,23 +14,23 @@ CMD_VALID_LIST="${CMD_VALID_LIST},suspend,suspendall,discard,help,tags"
 #
 # @param string _cmd the command right after 'vm '
 #
-cmd::parse_info(){
+cmd_parse_info(){
     local _cmd
 
-    cmd::find "_cmd" "$1" "${CMD_VALID_LIST}"
+    cmd_find "_cmd" "$1" "${CMD_VALID_LIST}"
 
     # "vm <subcommand> -h" command also displays help about any subcommand
     case "$2" in
-        -h|--help) help::show "${_cmd}" ;;
+        -h|--help) help_show "${_cmd}" ;;
     esac
 
     case "${_cmd}" in
-        version) util::version && exit ;;
-        usage)   util::usage ;;
+        version) util_version && exit ;;
+        usage)   util_usage ;;
         # "vm help <subcommand>" displays help about any subcommand
         help)
-            [ -z "$2" ] && help::_help
-            help::show "$2"
+            [ -z "$2" ] && help__help
+            help_show "$2"
 	    exit
 	    ;;
     esac
@@ -42,71 +42,71 @@ cmd::parse_info(){
 #
 # @param string _cmd the command right after 'vm '
 #
-cmd::parse(){
+cmd_parse(){
     local _cmd
 
     # try to find a matching command
-    cmd::find "_cmd" "$1" "${CMD_VALID_LIST}" || util::usage
+    cmd_find "_cmd" "$1" "${CMD_VALID_LIST}" || util_usage
     shift
 
     case "${_cmd}" in
-        init)      util::setup
-                   switch::init ;;
-        switch)    cmd::parse_switch "$@" ;;
-        datastore) cmd::parse_datastore "$@" ;;
-        image)     cmd::parse_image "$@" ;;
-        get)       core::get "$@" ;;
-        set)       core::set "$@" ;;
-        list)      core::list "$@" ;;
-        create)    core::create "$@" ;;
-        destroy)   core::destroy "$@" ;;
-        discard)   core::discard "$@" ;;
-        rename)    core::rename "$@" ;;
-        install)   core::install "$@" ;;
-        start)     core::start "$@" ;;
-        stop)      core::stop "$@" ;;
-        restart)   core::restart "$@" ;;
-        suspend)   core::suspend "$@" ;;
-        add)       core::add "$@" ;;
-        reset)     core::reset "$@" ;;
-        poweroff)  core::poweroff "$@" ;;
-        startall)  core::startall ;;
-        stopall)   core::stopall ;;
-        suspendall) core::suspendall ;;
-        console)   core::console "$@" ;;
-        iso)       core::iso "$@" ;;
-        img)       core::img "$@" ;;
-        configure|edit) core::configure "$@" ;;
-        passthru)  core::passthru ;;
-        _run)      vm::run "$@" ;;
-        info)      info::guest "$@" ;;
-        clone)     zfs::clone "$@" ;;
-        snapshot)  zfs::snapshot "$@" ;;
-        rollback)  zfs::rollback "$@" ;;
-        migrate)   migration::run "$@" ;;
-        tags)      cmd::parse_tags "$@" ;;
-        *)         util::err "unknown command '${_user_cmd}'. please run 'vm usage' or view the manpage for help" ;;
+        init)      util_setup
+                   switch_init ;;
+        switch)    cmd_parse_switch "$@" ;;
+        datastore) cmd_parse_datastore "$@" ;;
+        image)     cmd_parse_image "$@" ;;
+        get)       core_get "$@" ;;
+        set)       core_set "$@" ;;
+        list)      core_list "$@" ;;
+        create)    core_create "$@" ;;
+        destroy)   core_destroy "$@" ;;
+        discard)   core_discard "$@" ;;
+        rename)    core_rename "$@" ;;
+        install)   core_install "$@" ;;
+        start)     core_start "$@" ;;
+        stop)      core_stop "$@" ;;
+        restart)   core_restart "$@" ;;
+        suspend)   core_suspend "$@" ;;
+        add)       core_add "$@" ;;
+        reset)     core_reset "$@" ;;
+        poweroff)  core_poweroff "$@" ;;
+        startall)  core_startall ;;
+        stopall)   core_stopall ;;
+        suspendall) core_suspendall ;;
+        console)   core_console "$@" ;;
+        iso)       core_iso "$@" ;;
+        img)       core_img "$@" ;;
+        configure|edit) core_configure "$@" ;;
+        passthru)  core_passthru ;;
+        _run)      vm_run "$@" ;;
+        info)      info_guest "$@" ;;
+        clone)     zfs_clone "$@" ;;
+        snapshot)  zfs_snapshot "$@" ;;
+        rollback)  zfs_rollback "$@" ;;
+        migrate)   migration_run "$@" ;;
+        tags)      cmd_parse_tags "$@" ;;
+        *)         util_err "unknown command '${_user_cmd}'. please run 'vm usage' or view the manpage for help" ;;
     esac
 }
 
 # cmd: vm tags ...
 #
 # parse tags command
-cmd::parse_tags(){
+cmd_parse_tags(){
     local _cmd
 
-    [ -z "$1" ] && help::show "tags"
+    [ -z "$1" ] && help_show "tags"
 
     # try to find a matching command
-    cmd::find "_cmd" "$1" "add,remove,list,find,help" || help::show "tags"
+    cmd_find "_cmd" "$1" "add,remove,list,find,help" || help_show "tags"
     shift
 
     case "${_cmd}" in
-        add)     tags::add "$@" ;;
-        remove)  tags::remove "$@" ;;
-        list)    tags::list "$@" ;;
-        find)    tags::find "$@" ;;
-        help)    help::show "tags" ;;
+        add)     tags_add "$@" ;;
+        remove)  tags_remove "$@" ;;
+        list)    tags_list "$@" ;;
+        find)    tags_find "$@" ;;
+        help)    help_show "tags" ;;
     esac
 }
 
@@ -117,27 +117,27 @@ cmd::parse_tags(){
 #
 # @param string _cmd the command right after 'vm switch '
 #
-cmd::parse_switch(){
+cmd_parse_switch(){
     local _cmd
 
-    [ -z "$1" ] && help::show "switch"
+    [ -z "$1" ] && help_show "switch"
 
     # try to find a matching command
-    cmd::find "_cmd" "$1" "create,list,destroy,add,remove,vlan,nat,address,private,info" || help::show "switch"
+    cmd_find "_cmd" "$1" "create,list,destroy,add,remove,vlan,nat,address,private,info" || help_show "switch"
     shift
 
     case "${_cmd}" in
-        create)  switch::create "$@" ;;
-        list)    switch::list ;;
-        destroy) switch::remove "$@" ;;
-        add)     switch::add_member "$@" ;;
-        remove)  switch::remove_member "$@" ;;
-        vlan)    switch::vlan "$@" ;;
-        nat)     switch::nat "$@" ;;
-        address) switch::address "$@" ;;
-        private) switch::private "$@" ;;
-        info)    info::switch "$@" ;;
-        *)       util::err "unknown command '${_user_cmd}'. please run 'vm usage' or view the manpage for help" ;;
+        create)  switch_create "$@" ;;
+        list)    switch_list ;;
+        destroy) switch_remove "$@" ;;
+        add)     switch_add_member "$@" ;;
+        remove)  switch_remove_member "$@" ;;
+        vlan)    switch_vlan "$@" ;;
+        nat)     switch_nat "$@" ;;
+        address) switch_address "$@" ;;
+        private) switch_private "$@" ;;
+        info)    info_switch "$@" ;;
+        *)       util_err "unknown command '${_user_cmd}'. please run 'vm usage' or view the manpage for help" ;;
     esac
 }
 
@@ -147,22 +147,22 @@ cmd::parse_switch(){
 #
 # @param string _cmd the command after 'vm datastore ...'
 #
-cmd::parse_datastore(){
+cmd_parse_datastore(){
     local _cmd
 
-    [ -z "$1" ] && help::show "datastore"
+    [ -z "$1" ] && help_show "datastore"
 
     # try to find a matching command
-    cmd::find "_cmd" "$1" "list,add,remove,iso,img" || help::show "datastore"
+    cmd_find "_cmd" "$1" "list,add,remove,iso,img" || help_show "datastore"
     shift
 
     case "${_cmd}" in
-        list)   datastore::list ;;
-        add)    datastore::add "$@" ;;
-        remove) datastore::remove "$@" ;;
-        iso)    datastore::iso "$@" ;;
-        img)    datastore::img "$@" ;;
-        *)      util::err "unknown command '${_user_cmd}'. please run 'vm usage' or view the manpage for help" ;;
+        list)   datastore_list ;;
+        add)    datastore_add "$@" ;;
+        remove) datastore_remove "$@" ;;
+        iso)    datastore_iso "$@" ;;
+        img)    datastore_img "$@" ;;
+        *)      util_err "unknown command '${_user_cmd}'. please run 'vm usage' or view the manpage for help" ;;
     esac
 }
 
@@ -171,22 +171,22 @@ cmd::parse_datastore(){
 #
 # @param string _cmd the command after 'vm image '
 #
-cmd::parse_image(){
+cmd_parse_image(){
     local _cmd
 
-    [ -z "$1" ] && help::show "image"
-    [ -z "${VM_ZFS}" ] && util::err "\$vm_dir must be a ZFS datastore to use these functions"
+    [ -z "$1" ] && help_show "image"
+    [ -z "${VM_ZFS}" ] && util_err "\$vm_dir must be a ZFS datastore to use these functions"
 
     # try to find a matching command
-    cmd::find "_cmd" "$1" "list,create,provision,destroy" || help::show "image"
+    cmd_find "_cmd" "$1" "list,create,provision,destroy" || help_show "image"
     shift
 
     case "${_cmd}" in
-        list)      zfs::image_list ;;
-        create)    zfs::image_create "$@" ;;
-        provision) zfs::image_provision "$@" ;;
-        destroy)   zfs::image_destroy "$@" ;;
-        *)         util::err "unknown command '${_user_cmd}'. please run 'vm usage' or view the manpage for help" ;;
+        list)      zfs_image_list ;;
+        create)    zfs_image_create "$@" ;;
+        provision) zfs_image_provision "$@" ;;
+        destroy)   zfs_image_destroy "$@" ;;
+        *)         util_err "unknown command '${_user_cmd}'. please run 'vm usage' or view the manpage for help" ;;
     esac
 }
 
@@ -200,7 +200,7 @@ cmd::parse_image(){
 # @param _arglist[multiple] the callers $@
 # @return number of arguments caller should shift over
 #
-cmd::parse_args(){
+cmd_parse_args(){
     local _opt _count
 
     while getopts fitv _opt; do
@@ -214,7 +214,7 @@ cmd::parse_args(){
     done
 
     [ -n "${VM_OPT_FOREGROUND}" ] && [ -n "${VM_OPT_INTERACTIVE}" ] && \
-      util::err "foreground and interactive mode are mutually exclusive"
+      util_err "foreground and interactive mode are mutually exclusive"
 
     return $((OPTIND - 1))
 }
@@ -228,14 +228,14 @@ cmd::parse_args(){
 # @param string _valid comma-separated list of valid choices
 # @return success if we find one match
 #
-cmd::find(){
+cmd_find(){
     local _var="$1"
     local _user_cmd="$2"
     local _valid="$3"
     local _opt _choice _found=""
     local IFS=","
 
-    [ -n "${_user_cmd}" ] || util::err "no command specified"
+    [ -n "${_user_cmd}" ] || util_err "no command specified"
 
     for _opt in ${_valid}; do
         # exact match?
@@ -245,7 +245,7 @@ cmd::find(){
         fi
 
         if echo "${_opt}" | grep -iqs "^${_user_cmd}"; then
-           [ -n "${_found}" ] && util::err "ambiguous command '${_user_cmd}'"
+           [ -n "${_found}" ] && util_err "ambiguous command '${_user_cmd}'"
 
            _found=1
            _choice="${_opt}"

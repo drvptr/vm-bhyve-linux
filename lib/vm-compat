@@ -1,0 +1,64 @@
+#!/bin/bash
+# SPDX-License-Identifier: BSD-2-Clause
+#
+# Replacements for FreeBSD-only shell builtins and base utilities.
+# This file must be loaded before any other library.
+
+# setvar(1) is a builtin of FreeBSD's /bin/sh only. bash, dash and
+# busybox ash have no equivalent, so every "setvar <name> <value>" call
+# in the rest of the tree lands here.
+#
+# The local variables are deliberately given long, prefixed names: with
+# shell dynamic scoping, a local called _var or _value would shadow the
+# caller's variable of the same name and the assignment would be lost.
+#
+# @param string $1 name of the variable to assign to
+# @param string $2 value
+#
+setvar(){
+    local __vm_sv_var="$1"
+    local __vm_sv_value="$2"
+
+    __vm_sv_value=$(printf '%s' "${__vm_sv_value}" | sed \
+        -e 's/[\\]/\\&/g' \
+        -e 's/"/\\"/g' \
+        -e 's/\$/\\$/g' \
+        -e 's/`/\\`/g')
+
+    eval "${__vm_sv_var}=\"${__vm_sv_value}\""
+}
+
+# sysrc(8) is FreeBSD-only. Only the two forms used by vm-bhyve are
+# implemented:
+#
+#   sysrc -inqf <file> <key>=<value>   write
+#   sysrc -inqf <file> <key>           read (prints the value)
+#
+sysrc(){
+    local __vm_sysrc_file __vm_sysrc_arg __vm_sysrc_out
+
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            -*f) shift; __vm_sysrc_file="$1" ;;
+            -*)  ;;
+            *)   __vm_sysrc_arg="$1" ;;
+        esac
+        shift
+    done
+
+    [ -z "${__vm_sysrc_file}" ] && return 1
+    [ -z "${__vm_sysrc_arg}" ] && return 1
+
+    case "${__vm_sysrc_arg}" in
+        *=*)
+            [ -e "${__vm_sysrc_file}" ] || : > "${__vm_sysrc_file}" || return 1
+            config_file_set "${__vm_sysrc_file}" \
+                "${__vm_sysrc_arg%%=*}" "${__vm_sysrc_arg#*=}"
+            ;;
+        *)
+            config_load_file_value "__vm_sysrc_out" \
+                "${__vm_sysrc_file}" "${__vm_sysrc_arg}"
+            printf '%s\n' "${__vm_sysrc_out}"
+            ;;
+    esac
+}

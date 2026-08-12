@@ -18,15 +18,19 @@
 #   - FreeBSD "span" has no direct Linux bridge equivalent; it is logged
 #     as unsupported instead of silently doing something different.
 #   - VLAN interfaces are named <port>.<vid>.
-#   - switch::set_viid()/switch::find() and config::core::* are expected
+#   - switch_set_viid()/switch_find() and config_core_* are expected
 #     to be provided by the rest of the vm-bhyve code.
+#   - every tap this file creates gets tagged with
+#     'ip link set <tap> alias "vmnet/<guest>/<num>/<switch>"' - vm-info.sh
+#     (info___find_tap) and vm-switch.sh (switch_find/switch_set_viid, for
+#     bridges) both depend on this exact tag format to identify devices.
 
-switch::standard::init(){
+switch_standard_init(){
     local _name="$1"
     local _id _addr _mtu _len
 
     # see if it already exists
-    switch::standard::id "_id" "${_name}" && return 0
+    switch_standard_id "_id" "${_name}" && return 0
 
     # Linux interface names are normally limited to 15 characters.
     # Keep the vm- prefix where possible, otherwise use the switch name
@@ -41,47 +45,46 @@ switch::standard::init(){
 
     # Avoid collisions caused by truncation.
     if ip link show dev "${_id}" >/dev/null 2>&1; then
-        util::err "failed to create bridge interface for switch ${_name}: ${_id} already exists"
+        util_err "failed to create bridge interface for switch ${_name}: ${_id} already exists"
     fi
 
     ip link add name "${_id}" type bridge >/dev/null 2>&1
-    [ $? -eq 0 ] || util::err "failed to create bridge interface for switch ${_name}"
+    [ $? -eq 0 ] || util_err "failed to create bridge interface for switch ${_name}"
 
     ip link set dev "${_id}" up >/dev/null 2>&1
-    [ $? -eq 0 ] || util::err "failed to bring bridge ${_id} up"
+    [ $? -eq 0 ] || util_err "failed to bring bridge ${_id} up"
 
-    switch::set_viid "${_name}" "${_id}"
+    switch_set_viid "${_name}" "${_id}"
 
     # Randomise MAC. Linux iproute2 has no "link random" equivalent,
     # so generate a locally-administered unicast MAC.
+    # NB: strtonum()/and() are gawk extensions - mawk (the default awk on
+    # Debian/Ubuntu) does not have them and would silently produce an
+    # empty MAC. Do the arithmetic in the shell instead.
     _mac=$(
-        od -An -N6 -tx1 /dev/urandom 2>/dev/null |
-        awk '{
-            printf "%02x:%02x:%02x:%02x:%02x:%02x",
-                   and("0x"$1,0xfe)+2, strtonum("0x"$2),
-                   strtonum("0x"$3), strtonum("0x"$4),
-                   strtonum("0x"$5), strtonum("0x"$6)
-        }'
+        set -- $(od -An -N6 -tx1 /dev/urandom 2>/dev/null)
+        [ $# -ge 6 ] && printf "%02x:%s:%s:%s:%s:%s" \
+            $(( (0x$1 & 0xfe) | 0x02 )) "$2" "$3" "$4" "$5" "$6"
     )
     [ -n "${_mac}" ] &&
         ip link set dev "${_id}" address "${_mac}" >/dev/null 2>&1
 
     # try to set ip address
-    config::core::get "_addr" "addr_${_name}"
+    config_core_get "_addr" "addr_${_name}"
     [ -n "${_addr}" ] &&
         ip addr add "${_addr}" dev "${_id}" >/dev/null 2>&1
 
-    config::core::get "_addr" "addr6_${_name}"
+    config_core_get "_addr" "addr6_${_name}"
     [ -n "${_addr}" ] &&
         ip -6 addr add "${_addr}" dev "${_id}" >/dev/null 2>&1
 
     # custom mtu?
-    config::core::get "_mtu" "mtu_${_name}"
+    config_core_get "_mtu" "mtu_${_name}"
     [ -n "${_mtu}" ] &&
         ip link set dev "${_id}" mtu "${_mtu}" >/dev/null 2>&1
 
     # add member interfaces
-    switch::standard::__add_members "${_name}" "${_id}"
+    switch_standard___add_members "${_name}" "${_id}"
 }
 
 # show the configuration details for a switch
@@ -89,28 +92,28 @@ switch::standard::init(){
 # @param string _name the switch name
 # @param string _format output format
 #
-switch::standard::show(){
+switch_standard_show(){
     local _name="$1"
     local _format="$2"
     local _id _vlan _ports _addr _addr6 _mtu _priv
 
-    switch::find "_id" "${_name}"
-    config::core::get "_ports" "ports_${_name}"
-    config::core::get "_vlan" "vlan_${_name}"
-    config::core::get "_addr" "addr_${_name}"
-    config::core::get "_addr6" "addr6_${_name}"
-    config::core::get "_mtu" "mtu_${_name}"
-    config::core::get "_priv" "private_${_name}" "no"
+    switch_find "_id" "${_name}"
+    config_core_get "_ports" "ports_${_name}"
+    config_core_get "_vlan" "vlan_${_name}"
+    config_core_get "_addr" "addr_${_name}"
+    config_core_get "_addr6" "addr6_${_name}"
+    config_core_get "_mtu" "mtu_${_name}"
+    config_core_get "_priv" "private_${_name}" "no"
 
     if [ -n "${_addr}" ] && [ -n "${_addr6}" ]; then
         printf "${_format}" "${_name}" "standard" "${_id:--}" "${_addr:--}" "${_priv}" "${_mtu:--}" \
             "${_vlan:--}" "${_ports:--}"
 
         printf "${_format}" \
-            "$(util::pad_spaces "${_name}")" "$(util::pad_spaces "standard")" \
-            "$(util::pad_spaces "${_id}")" "${_addr6}" \
-            "$(util::pad_spaces "${_priv}")" "$(util::pad_spaces "${_mtu}")" \
-            "$(util::pad_spaces "${_vlan}")" "$(util::pad_spaces "${_ports}")"
+            "$(util_pad_spaces "${_name}")" "$(util_pad_spaces "standard")" \
+            "$(util_pad_spaces "${_id}")" "${_addr6}" \
+            "$(util_pad_spaces "${_priv}")" "$(util_pad_spaces "${_mtu}")" \
+            "$(util_pad_spaces "${_vlan}")" "$(util_pad_spaces "${_ports}")"
     else
         printf "${_format}" "${_name}" "standard" "${_id:--}" "${_addr:-${_addr6:--}}" "${_priv}" \
             "${_mtu:--}" "${_vlan:--}" "${_ports:--}"
@@ -119,38 +122,38 @@ switch::standard::show(){
 
 # create a standard virtual switch
 #
-switch::standard::create(){
+switch_standard_create(){
     # store configuration
-    config::core::set "switch_list" "${_switch}" "1"
-    config::core::set "type_${_switch}" "standard"
+    config_core_set "switch_list" "${_switch}" "1"
+    config_core_set "type_${_switch}" "standard"
 
-    [ -n "${_if}" ] && config::core::set "ports_${_switch}" "${_if}"
-    [ -n "${_vlan}" ] && config::core::set "vlan_${_switch}" "${_vlan}"
-    [ -n "${_priv}" ] && config::core::set "private_${_switch}" "${_priv}"
-    [ -n "${_mtu}" ] && config::core::set "mtu_${_switch}" "${_mtu}"
+    [ -n "${_if}" ] && config_core_set "ports_${_switch}" "${_if}"
+    [ -n "${_vlan}" ] && config_core_set "vlan_${_switch}" "${_vlan}"
+    [ -n "${_priv}" ] && config_core_set "private_${_switch}" "${_priv}"
+    [ -n "${_mtu}" ] && config_core_set "mtu_${_switch}" "${_mtu}"
 
     case "${_addr}" in
         "") ;;
-        *:*) config::core::set "addr6_${_switch}" "${_addr}" ;;
-        *)   config::core::set "addr_${_switch}" "${_addr}" ;;
+        *:*) config_core_set "addr6_${_switch}" "${_addr}" ;;
+        *)   config_core_set "addr_${_switch}" "${_addr}" ;;
     esac
 
-    config::core::load
-    switch::standard::init "${_switch}"
+    config_core_load
+    switch_standard_init "${_switch}"
 }
 
 # destroy a standard switch
 #
 # @param string _switch name of the switch to destroy
 #
-switch::standard::remove(){
+switch_standard_remove(){
     local _switch="$1"
     local _id
 
-    switch::standard::id "_id" "${_switch}"
+    switch_standard_id "_id" "${_switch}"
     [ $? -eq 0 ] || return 1
 
-    switch::standard::__remove_members "${_switch}" "${_id}"
+    switch_standard___remove_members "${_switch}" "${_id}"
 
     ip link set dev "${_id}" down >/dev/null 2>&1
     ip link delete dev "${_id}" type bridge >/dev/null 2>&1
@@ -161,118 +164,118 @@ switch::standard::remove(){
 # @param string _switch the switch to add port to
 # @param string _if the interface to add
 #
-switch::standard::add_member(){
+switch_standard_add_member(){
     local _switch="$1"
     local _if="$2"
     local _id _vlan _mtu
 
-    switch::standard::id "_id" "${_switch}" ||
-        util::err "unable to locate switch id"
+    switch_standard_id "_id" "${_switch}" ||
+        util_err "unable to locate switch id"
 
-    config::core::get "_vlan" "vlan_${_switch}"
-    config::core::get "_mtu" "mtu_${_switch}"
+    config_core_get "_vlan" "vlan_${_switch}"
+    config_core_get "_mtu" "mtu_${_switch}"
 
-    switch::standard::__configure_port "${_switch}" "${_id}" "${_if}" "${_vlan}" "${_mtu}"
-    config::core::set "ports_${_switch}" "${_if}" "1"
+    switch_standard___configure_port "${_switch}" "${_id}" "${_if}" "${_vlan}" "${_mtu}"
+    config_core_set "ports_${_switch}" "${_if}" "1"
 }
 
 # remove a member interface from this switch
 #
-switch::standard::remove_member(){
+switch_standard_remove_member(){
     local _switch="$1"
     local _if="$2"
     local _id _vlan
 
-    switch::standard::id "_id" "${_switch}" ||
-        util::err "unable to locate switch id"
+    switch_standard_id "_id" "${_switch}" ||
+        util_err "unable to locate switch id"
 
-    config::core::remove "ports_${_switch}" "${_if}"
-    config::core::get "_vlan" "vlan_${_switch}"
+    config_core_remove "ports_${_switch}" "${_if}"
+    config_core_get "_vlan" "vlan_${_switch}"
 
-    switch::standard::__unconfigure_port "${_switch}" "${_id}" "${_if}" "${_vlan}"
+    switch_standard___unconfigure_port "${_switch}" "${_id}" "${_if}" "${_vlan}"
 }
 
 # set vlan id
 #
-switch::standard::vlan(){
+switch_standard_vlan(){
     local _switch="$1"
     local _vlan="$2"
     local _id
 
-    switch::standard::id "_id" "${_switch}" ||
-        util::err "unable to locate switch id"
+    switch_standard_id "_id" "${_switch}" ||
+        util_err "unable to locate switch id"
 
-    switch::standard::__remove_members "${_switch}" "${_id}"
+    switch_standard___remove_members "${_switch}" "${_id}"
 
     if [ "${_vlan}" = "0" ]; then
-        config::core::remove "vlan_${_switch}"
+        config_core_remove "vlan_${_switch}"
     else
-        config::core::set "vlan_${_switch}" "${_vlan}"
+        config_core_set "vlan_${_switch}" "${_vlan}"
     fi
 
-    config::core::load
-    switch::standard::__add_members "${_switch}" "${_id}"
+    config_core_load
+    switch_standard___add_members "${_switch}" "${_id}"
 }
 
 # set or remove ip address
 #
 # @param string _switch switch name
 # @param string _addr address or "none"
-# @scope _id switch id from parent switch::address
+# @scope _id switch id from parent switch_address
 #
-switch::standard::address(){
+switch_standard_address(){
     local _switch="$1"
     local _addr="$2"
     local _delete="$3"
     local _curr _curr6
 
     if [ "${_delete}" = "delete" ]; then
-        config::core::get "_curr" "addr_${_switch}"
-        config::core::get "_curr6" "addr6_${_switch}"
+        config_core_get "_curr" "addr_${_switch}"
+        config_core_get "_curr6" "addr6_${_switch}"
 
         case "${_addr}" in
             "${_curr}")
-                config::core::remove "addr_${_switch}"
+                config_core_remove "addr_${_switch}"
                 ip addr del "${_curr}" dev "${_id}" >/dev/null 2>&1
                 ;;
             "${_curr6}")
-                config::core::remove "addr6_${_switch}"
+                config_core_remove "addr6_${_switch}"
                 ip -6 addr del "${_curr6}" dev "${_id}" >/dev/null 2>&1
                 ;;
             *)
-                util::err "specified address ${_addr} is not assigned to this switch"
+                util_err "specified address ${_addr} is not assigned to this switch"
                 ;;
         esac
 
         return 0
     fi
 
-    config::core::get "_curr" "addr_${_switch}"
-    config::core::get "_curr6" "addr6_${_switch}"
+    config_core_get "_curr" "addr_${_switch}"
+    config_core_get "_curr6" "addr6_${_switch}"
 
     if [ "${_addr}" = "none" ]; then
         [ -z "${_curr}" ] && [ -z "${_curr6}" ] &&
-            util::err "unable to locate an existing address for this switch"
+            util_err "unable to locate an existing address for this switch"
 
         if [ -n "${_curr}" ]; then
-            config::core::remove "addr_${_switch}"
+            config_core_remove "addr_${_switch}"
             ip addr del "${_curr}" dev "${_id}" >/dev/null 2>&1
         fi
 
         if [ -n "${_curr6}" ]; then
-            config::core::remove "addr6_${_switch}"
+            config_core_remove "addr6_${_switch}"
             ip -6 addr del "${_curr6}" dev "${_id}" >/dev/null 2>&1
         fi
     else
         case "${_addr}" in
             *:*) # IPv6
                 [ "${_curr6}" = "${_addr}" ] &&
-                    util::err "The specified IP address is already assigned to this switch."
+                    util_err "The specified IP address is already assigned to this switch."
 
                 [ -n "${_curr6}" ] &&
-                    { util::confirm "This switch already has ${_curr6} assigned, replace it?" || exit 0; }
+                    { util_confirm "This switch already has ${_curr6} assigned, replace it?" || exit 0; }
 
-                config::core::set "addr6_${_switch}" "${_addr}"
+                config_core_set "addr6_${_switch}" "${_addr}"
                 ip -6 addr add "${_addr}" dev "${_id}" >/dev/null 2>&1
 
                 [ -n "${_curr6}" ] &&
@@ -280,12 +283,12 @@ switch::standard::address(){
                 ;;
             *) # IPv4
                 [ "${_curr}" = "${_addr}" ] &&
-                    util::err "The specified IP address is already assigned to this switch."
+                    util_err "The specified IP address is already assigned to this switch."
 
                 [ -n "${_curr}" ] &&
-                    { util::confirm "This switch already has ${_curr} assigned, replace it?" || exit 0; }
+                    { util_confirm "This switch already has ${_curr} assigned, replace it?" || exit 0; }
 
-                config::core::set "addr_${_switch}" "${_addr}"
+                config_core_set "addr_${_switch}" "${_addr}"
                 ip addr add "${_addr}" dev "${_id}" >/dev/null 2>&1
 
                 [ -n "${_curr}" ] &&
@@ -296,50 +299,50 @@ switch::standard::address(){
 }
 
 # add all member interfaces to a switch
-switch::standard::__add_members(){
+switch_standard___add_members(){
     local _switch="$1"
     local _id="$2"
     local _ports _vlan _port _mtu
 
     if [ -z "${_id}" ]; then
-        switch::standard::id "_id" "${_switch}" ||
-            util::err "failed to get switch id while adding members"
+        switch_standard_id "_id" "${_switch}" ||
+            util_err "failed to get switch id while adding members"
     fi
 
-    config::core::get "_ports" "ports_${_switch}"
-    config::core::get "_vlan" "vlan_${_switch}"
-    config::core::get "_mtu" "mtu_${_switch}"
+    config_core_get "_ports" "ports_${_switch}"
+    config_core_get "_vlan" "vlan_${_switch}"
+    config_core_get "_mtu" "mtu_${_switch}"
 
     if [ -n "${_ports}" ]; then
         for _port in ${_ports}; do
-            switch::standard::__configure_port "${_switch}" "${_id}" "${_port}" "${_vlan}" "${_mtu}"
+            switch_standard___configure_port "${_switch}" "${_id}" "${_port}" "${_vlan}" "${_mtu}"
         done
     fi
 }
 
 # remove member interfaces from a switch
-switch::standard::__remove_members(){
+switch_standard___remove_members(){
     local _switch="$1"
     local _id="$2"
     local _ports _port _vlan
 
     if [ -z "${_id}" ]; then
-        switch::standard::id "_id" "${_switch}" ||
-            util::err "failed to get switch id while removing members"
+        switch_standard_id "_id" "${_switch}" ||
+            util_err "failed to get switch id while removing members"
     fi
 
-    config::core::get "_ports" "ports_${_switch}"
-    config::core::get "_vlan" "vlan_${_switch}"
+    config_core_get "_ports" "ports_${_switch}"
+    config_core_get "_vlan" "vlan_${_switch}"
 
     if [ -n "${_ports}" ]; then
         for _port in ${_ports}; do
-            switch::standard::__unconfigure_port "${_switch}" "${_id}" "${_port}" "${_vlan}"
+            switch_standard___unconfigure_port "${_switch}" "${_id}" "${_port}" "${_vlan}"
         done
     fi
 }
 
 # configure a local port for our bridge
-switch::standard::__configure_port(){
+switch_standard___configure_port(){
     local _switch="$1"
     local _id="$2"
     local _port="$3"
@@ -353,14 +356,14 @@ switch::standard::__configure_port(){
     if [ -n "${_vlan}" ]; then
         _vname="${_port}.${_vlan}"
 
-        switch::standard::id "_viface" "${_vname}"
+        switch_standard_id "_viface" "${_vname}"
 
         if [ $? -ne 0 ]; then
             ip link add link "${_port}" name "${_vname}" type vlan id "${_vlan}" >/dev/null 2>&1
             [ $? -eq 0 ] ||
-                util::err "failed to create vlan interface for port ${_port} on switch ${_switch}"
+                util_err "failed to create vlan interface for port ${_port} on switch ${_switch}"
 
-            switch::set_viid "${_vname}" "${_vname}"
+            switch_set_viid "${_vname}" "${_vname}"
 
             ip link set dev "${_vname}" mtu "${_mtu}" >/dev/null 2>&1
             ip link set dev "${_vname}" up >/dev/null 2>&1
@@ -372,11 +375,11 @@ switch::standard::__configure_port(){
     fi
 
     [ $? -eq 0 ] ||
-        util::err "failed to add member ${_port} to the virtual switch ${_switch}"
+        util_err "failed to add member ${_port} to the virtual switch ${_switch}"
 }
 
 # unconfigure a local port
-switch::standard::__unconfigure_port(){
+switch_standard___unconfigure_port(){
     local _switch="$1"
     local _id="$2"
     local _port="$3"
@@ -384,7 +387,7 @@ switch::standard::__unconfigure_port(){
     local _vid
 
     if [ -n "${_vlan}" ]; then
-        switch::standard::id "_vid" "${_port}.${_vlan}"
+        switch_standard_id "_vid" "${_port}.${_vlan}"
 
         if [ $? -eq 0 ]; then
             ip link set dev "${_vid}" nomaster >/dev/null 2>&1
@@ -398,17 +401,20 @@ switch::standard::__unconfigure_port(){
 
 # get the id for a standard switch
 # this returns the associated bridge name
-switch::standard::id(){
-    switch::find "$1" "$2"
+switch_standard_id(){
+    switch_find "$1" "$2"
 }
 
 # creates a standard tap interface for a guest
-# relies heavily on variables set in the main vm::run function
-switch::standard::provision(){
-    local _tap _custom_tap _sid _mtu _member_type _iname
+# relies heavily on variables set in the main vm_run function
+#
+# @modifies _devices _taplist
+#
+switch_standard_provision(){
+    local _tap _custom_tap _sid _mtu _member_type _iname _qdev
 
-    config::get "_custom_tap" "network${_num}_device"
-    config::get "_iname" "network${_num}_name"
+    config_get "_custom_tap" "network${_num}_device"
+    config_get "_iname" "network${_num}_name"
 
     # create interface
     if [ -n "${_custom_tap}" ]; then
@@ -432,15 +438,22 @@ switch::standard::provision(){
 
     [ -z "${_tap}" ] && return 1
 
-    util::log "guest" "${_name}" "initialising network device ${_tap}"
+    util_log "guest" "${_name}" "initialising network device ${_tap}"
 
     ip link set dev "${_tap}" up >/dev/null 2>&1
 
+    # tag this tap with the guest/interface it belongs to, mirroring
+    # FreeBSD's "ifconfig descr vmnet/<name>/<num>/<switch>". vm-info.sh
+    # (info___find_tap, info_switch_ports) reads this alias back to work
+    # out which tap belongs to which guest - without it, 'vm info' just
+    # can't find the interface (falls back to "-", doesn't error).
+    ip link set dev "${_tap}" alias "vmnet/${_name}/${_num}/${_switch:-custom}" >/dev/null 2>&1
+
     if [ -n "${_switch}" ]; then
-        switch::id "_sid" "${_switch}"
+        switch_id "_sid" "${_switch}"
 
         _member_type="master"
-        if config::yesno "network${_num}_span"; then
+        if config_yesno "network${_num}_span"; then
             _member_type="span"
         fi
 
@@ -449,38 +462,50 @@ switch::standard::provision(){
                 awk '{for(i=1;i<=NF;i++) if($i=="mtu"){print $(i+1); exit}}')
 
             if [ "${_mtu}" != "1500" ] && [ -n "${_mtu}" ]; then
-                util::log "guest" "${_name}" "setting mtu of ${_tap} to ${_mtu}"
+                util_log "guest" "${_name}" "setting mtu of ${_tap} to ${_mtu}"
                 ip link set dev "${_tap}" mtu "${_mtu}" >/dev/null 2>&1
             fi
 
             if [ "${_member_type}" = "span" ]; then
-                util::log "guest" "${_name}" \
+                util_log "guest" "${_name}" \
                     "span mode is not directly supported by Linux bridge; adding ${_tap} normally"
             fi
 
-            util::log "guest" "${_name}" "adding ${_tap} -> ${_sid} (${_switch} ${_member_type})"
+            util_log "guest" "${_name}" "adding ${_tap} -> ${_sid} (${_switch} ${_member_type})"
             ip link set dev "${_tap}" master "${_sid}" >/dev/null 2>&1 ||
-                util::log "guest" "${_name}" "failed to add ${_tap} to ${_sid}"
+                util_log "guest" "${_name}" "failed to add ${_tap} to ${_sid}"
 
-            util::log "guest" "${_name}" "bring up ${_tap} -> ${_sid} (${_switch} ${_member_type})"
+            util_log "guest" "${_name}" "bring up ${_tap} -> ${_sid} (${_switch} ${_member_type})"
             ip link set dev "${_tap}" up >/dev/null 2>&1 ||
-                util::log "guest" "${_name}" "failed to bring up ${_tap} in ${_sid}"
+                util_log "guest" "${_name}" "failed to bring up ${_tap} in ${_sid}"
 
             # Linux equivalent of FreeBSD bridge "private":
             # an isolated port cannot talk directly to another isolated port.
-            if switch::is_private "${_switch}"; then
+            if switch_is_private "${_switch}"; then
                 bridge link set dev "${_tap}" isolated on >/dev/null 2>&1 ||
-                    util::log "guest" "${_name}" \
+                    util_log "guest" "${_name}" \
                         "failed to enable isolated mode on ${_tap}"
             fi
         else
-            util::log "guest" "${_name}" "failed to find virtual switch '${_switch}'"
+            util_log "guest" "${_name}" "failed to find virtual switch '${_switch}'"
         fi
     fi
 
-    _devices="${_devices} -s ${_bus}:${_slot}:${_func},${_emulation},${_tap}"
+    # LINUX/QEMU: bhyve's "-s bus:slot:func,virtio-net,tap0" has no qemu
+    # equivalent - qemu wants a -netdev backend plus a -device frontend
+    # and assigns PCI addresses itself.
+    case "${_emulation}" in
+        virtio-net) _qdev="virtio-net-pci" ;;
+        e1000)      _qdev="e1000" ;;
+        *)
+            util_log "guest" "${_name}" "warning; unrecognised network emulation '${_emulation}', passing through as-is"
+            _qdev="${_emulation}"
+            ;;
+    esac
+
+    _devices="${_devices} -netdev tap,id=vmnet${_num},ifname=${_tap},script=no,downscript=no"
+    _devices="${_devices} -device ${_qdev},netdev=vmnet${_num}"
     [ -n "${_mac}" ] && _devices="${_devices},mac=${_mac}"
 
-    _func=$((_func + 1))
     [ -z "${_custom_tap}" ] && _taplist="${_taplist}${_taplist:+ }${_tap}"
 }
