@@ -1,6 +1,52 @@
 #!/bin/sh
 # SPDX-License-Identifier: BSD-2-Clause
 # SPDX-FileCopyrightText: 2016 Matt Churchyard <churchers@gmail.com>
+# SPDX-FileCopyrightText: 2026 Petr Derbyshev <drvpotr@gmail.com>
+
+# ============================================================================
+# Linux/QEMU port notes - read this before the rest of the file.
+#
+# This is not a mechanical command-swap like the other files: bhyve and QEMU
+# have genuinely different architectures, so a few things were redesigned
+# rather than translated. The big ones:
+#
+# 1. No manual PCI slot/bus/func bookkeeping. bhyve requires you to hand out
+#    -s bus:slot:func for every device; QEMU auto-assigns PCI addresses.
+#    All of _slot/_bus/_func/_maxslots/start_slot/install_slot are gone.
+#
+# 2. No separate bootloader pass. bhyveload/grub-bhyve exist because bhyve
+#    has no firmware of its own for BIOS-mode boots. QEMU has SeaBIOS (and
+#    OVMF for UEFI) built in, so guest::load and everything around _com is
+#    gone entirely.
+#
+# 3. QEMU survives a guest-initiated reboot inside the same process - bhyve
+#    does not, which is *why* the original has a "while true; run bhyve;
+#    check exit code; maybe loop" structure. Under QEMU that loop now only
+#    ever re-executes for an explicit 'vm restart' (see vm::handle_exit) -
+#    a normal in-guest reboot just keeps running, no wrapper involvement.
+#    on_restart is therefore a no-op here; see vm::handle_exit for why.
+#
+# 4. Install media now uses '-boot once=d' (boot the CD once, then fall
+#    through to the normal boot order on any later internal reset) instead
+#    of the iso-then-loop-then-clear dance the original needs to get from
+#    "boot installer" to "boot the freshly installed disk" - QEMU handles
+#    that natively so nulliso_fix and the fbuf "clear wait" hack are gone.
+#
+# Known rough edges / assumptions, called out again inline where relevant:
+#  - OVMF firmware path is guessed (Debian/Ubuntu default) - adjust for
+#    your distro if it's somewhere else.
+#  - Audio uses pipewire; change vm::qemu_device_sound if your host uses
+#    pulseaudio/alsa instead.
+#  - graphics_res / VNC "wait" can't be replicated exactly (see
+#    vm::qemu_device_fbuf) - the guest boots CPU-paused instead, you need
+#    to resume it yourself via QMP once connected.
+#  - vm::qemu_device_networking still just loops and calls switch::provision
+#    per interface, same as the original - actually building the QEMU
+#    -netdev/-device args for a tap is switch::standard::provision's job
+#    (in vm-switch-standard, not this file). It needs to tag every tap it
+#    creates with 'ip link set <tap> alias "vmnet/<name>/<num>/<switch>"'
+#    to match what vm-switch.sh/vm-info.sh already expect to find.
+# ============================================================================
 
 # 'vm _run'
 # run a virtual machine
@@ -12,26 +58,39 @@
 #
 vm::run(){
     local _name _iso _iso_dev
-    local _cpu _memory _bootdisk _bootdisk_dev _guest _wiredmem
-    local _guest_support _uefi _uuid _debug _hostbridge _fwcfg _loader
-    local _opts _devices _slot _bus=0 _maxslots=31 _install_slot _func=0 _taplist _exit _passdev
-    local _com _comports _comstring _logpath="/dev/null" _run=1
-    local _bhyve_options _action
+    local _cpu _memory _bootdisk _bootdisk_dev _uuid _debug _loader
+    local _opts _devices _taplist _exit _passdev
+    local _comports _comstring _logpath="/dev/null" _run=1
+    local _qemu_options _bhyve_options _action _boot_opt _accel _pid _tap _seedcmd
 
     cmd::parse_args "$@"
     shift $?
     _name="$1"
     _iso="$2"
 
-    # try to load datstore details
+    # try to load datastore details
     datastore::get_guest "${_name}" || exit 5
 
     # bail out immediately if guest running
     vm::confirm_stopped "${_name}" "1" || exit 10
 
     if [ -d "${VM_DS_PATH}/${_name}/.cloud-init" ] && [ ! -f "${VM_DS_PATH}/${_name}/seed.iso" ]; then
-      makefs -t cd9660 -o R,L=cidata "${VM_DS_PATH}/${_name}/seed.iso" "${VM_DS_PATH}/${_name}/.cloud-init" || util::err "Can't write seed.iso for cloud-init"
-      util::log "guest" "${_name}" "created ${VM_DS_PATH}/${_name}/seed.iso for cloud-init"
+        # Linux: makefs -t cd9660 doesn't exist here - genisoimage (or its
+        # xorriso -as genisoimage shim) is the standard way to build an
+        # ISO9660 volume for cloud-init's NoCloud datasource.
+        if command -v genisoimage >/dev/null 2>&1; then
+            _seedcmd="genisoimage"
+        elif command -v xorriso >/dev/null 2>&1; then
+            _seedcmd="xorriso -as genisoimage"
+        else
+            util::err "genisoimage (or xorriso) is required to build seed.iso for cloud-init"
+        fi
+
+        ${_seedcmd} -output "${VM_DS_PATH}/${_name}/seed.iso" -volid cidata -joliet -rock \
+            "${VM_DS_PATH}/${_name}/.cloud-init" >/dev/null 2>&1 \
+            || util::err "Can't write seed.iso for cloud-init"
+
+        util::log "guest" "${_name}" "created ${VM_DS_PATH}/${_name}/seed.iso for cloud-init"
     fi
 
     config::load "${VM_DS_PATH}/${_name}/${_name}.conf"
@@ -39,14 +98,16 @@ vm::run(){
     config::get "_loader" "loader"
     config::get "_bootdisk" "disk0_name"
     config::get "_bootdisk_dev" "disk0_dev" "file"
-    config::get "_hostbridge" "hostbridge" "standard"
-    config::get "_fwcfg" "fwcfg"
     config::get "_comports" "comports" "com1"
     config::get "_uuid" "uuid"
     config::get "_debug" "debug" "no"
     config::get "_bhyve_options" "bhyve_options"
-    config::get "_slot" "start_slot" "4"
-    config::get "_install_slot" "install_slot" "3"
+    config::get "_qemu_options" "qemu_options"
+
+    # bhyve_options is bhyve CLI syntax and would almost certainly be wrong
+    # for qemu - warn rather than silently drop it or silently apply garbage
+    [ -n "${_bhyve_options}" ] && \
+        util::log "guest" "${_name}" "warning; 'bhyve_options' is ignored under Linux/QEMU - set 'qemu_options' instead"
 
     # generate a uuid if we don't have one already
     if [ -z "${_uuid}" ]; then
@@ -63,7 +124,6 @@ vm::run(){
       " [loader: ${_loader}]" \
       " [cpu: ${_cpu}]" \
       " [memory: ${_memory}]" \
-      " [hostbridge: ${_hostbridge}]" \
       " [com ports: ${_comports}]" \
       " [uuid: ${_uuid}]" \
       " [debug mode: ${_debug}]" \
@@ -76,76 +136,65 @@ vm::run(){
         exit 15
     fi
 
-    # check ug
-    if [ -n "${VM_NO_UG}" ]; then
-
-        # only FreeBSD guests. these start direct in 64bit mode and don't need UG
-        if [ "${_loader}" != "bhyveload" ]; then
-            util::log "guest" "${_name}" "fatal; unable to start - no unrestricted guest support"
-            exit 15
-        fi
-
-        # only 1 vcpu
-        if [ "${_cpu}" != "1" ]; then
-            _cpu=1
-            util::log "guest" "${_name}" "warning; no unrestricted guest support. reducing vcpu count to 1"
-        fi
+    # kvm acceleration if available, otherwise fall back to (much slower)
+    # software emulation rather than failing outright
+    if [ -r /dev/kvm ] && [ -w /dev/kvm ]; then
+        _accel="kvm"
+    else
+        util::log "guest" "${_name}" "warning; /dev/kvm not accessible, falling back to tcg (software emulation, much slower)"
+        _accel="tcg"
     fi
 
-    # default bhyve options
-    _opts="-AHPw"
+    # base machine/cpu/memory. -nodefaults so we control every device
+    # ourselves rather than accepting whatever qemu would add by default
+    _opts="-machine q35,accel=${_accel} -cpu max -smp ${_cpu} -m ${_memory} -nodefaults"
+    [ -n "${_uuid}" ] && _opts="${_opts} -uuid ${_uuid}"
 
-    # ignore access to unimplemented Model Specific Registers?
-    config::yesno "ignore_msr" && _opts="${_opts}w"
+    if config::yesno "utctime" yes; then
+        _opts="${_opts} -rtc base=utc"
+    else
+        _opts="${_opts} -rtc base=localtime"
+    fi
 
-    # if uefi, make sure we have bootrom, then update options for uefi support
+    # wired/locked memory - relevant for passthrough DMA reliability
+    config::yesno "wired_memory" && _opts="${_opts} -overcommit mem-lock=on"
+
+    # if uefi, make sure we have firmware, then update options for uefi support
     if [ "${_loader%-*}" = "uefi" ]; then
         vm::uefi
     fi
 
-    # add any custom bhyve options
-    [ -n "${_bhyve_options}" ] && _opts="${_opts} ${_bhyve_options}"
+    # add any custom qemu options
+    [ -n "${_qemu_options}" ] && _opts="${_opts} ${_qemu_options}"
 
-    # if we have passthru, check vt-d or amdvi support now and exit
+    # if we have passthru, check iommu support now and exit if not available
     config::get "_passdev" "passthru0"
 
-    if [ -n "${_passdev}" ] && ! util::check_bhyve_iommu; then
-        util::log "guest" "${_name}" "fatal; pci passthrough not supported on this system (no VT-d or amdvi)"
+    if [ -n "${_passdev}" ] && [ ! -d /sys/kernel/iommu_groups ] ; then
+        util::log "guest" "${_name}" "fatal; pci passthrough not supported on this system (no IOMMU groups - check IOMMU/VT-d/AMD-Vi is enabled in firmware and on the kernel command line)"
+        exit 15
+    fi
+    if [ -n "${_passdev}" ] && [ -z "$(ls -A /sys/kernel/iommu_groups 2>/dev/null)" ]; then
+        util::log "guest" "${_name}" "fatal; pci passthrough not supported on this system (no IOMMU groups - check IOMMU/VT-d/AMD-Vi is enabled in firmware and on the kernel command line)"
         exit 15
     fi
 
-    # wired memory?
-    if config::yesno "wired_memory"; then
-        _wiredmem="1"
-        _opts="${_opts} -S"
-    fi
+    # send qemu's stderr to qemu.log if debug=yes
+    util::yesno "${_debug}" && _logpath="${VM_DS_PATH}/${_name}/qemu.log"
 
-    # set cpu/memory and uuid in opts
-    _opts="-c ${_cpu} -m ${_memory} ${_opts}"
-    [ -n "${_uuid}" ] && _opts="${_opts} -U ${_uuid}"
-
-    # set utc time in opts if requested
-    if config::yesno "utctime" yes; then
-        _opts="${_opts} -u"
-    fi
-
-    # send bhyve output to bhyve.log if debug=yes
-    util::yesno "${_debug}" && _logpath="${VM_DS_PATH}/${_name}/bhyve.log"
-
-    # complete the boot disk path
+    # complete the boot disk path (informational logging only, see above)
     [ -n "${_bootdisk}" ] && vm::get_disk_path "_bootdisk" "${_name}" "${_bootdisk}" "${_bootdisk_dev}"
 
-    # build bhyve device string
-    vm::bhyve_device_comports
-    vm::bhyve_device_basic
-    vm::bhyve_device_disks
-    vm::bhyve_device_networking
-    vm::bhyve_device_rand
-    vm::bhyve_device_passthru
-    vm::bhyve_device_fbuf
-    vm::bhyve_device_mouse
-    vm::bhyve_device_sound
-    vm::bhyve_device_console
+    # build qemu device string
+    vm::qemu_device_comports
+    vm::qemu_device_disks
+    vm::qemu_device_networking
+    vm::qemu_device_rand
+    vm::qemu_device_passthru
+    vm::qemu_device_fbuf
+    vm::qemu_device_mouse
+    vm::qemu_device_sound
+    vm::qemu_device_console
 
     vm::lock
     util::log "guest" "${_name}" "booting"
@@ -153,105 +202,66 @@ vm::run(){
 
     while true; do
 
-        # destroy existing vmm
-        # freebsd seems happy to run a bhyveload/bhyve loop
-        # grub-bhyve doesn't seem to like it for a lot of users
-        # Peter says don't destroy in Windows instructions, so don't if in UEFI mode
-        if [ -e "/dev/vmm/${_name}" -a -z "${_uefi}" ]; then
-            bhyvectl --vm="${_name}" --destroy >/dev/null 2>&1
-            if [ $? -ne 0 ]; then
-                util::log "guest" "${_name}" "fatal; failed to destroy existing vmm device"
-                _exit=15
-                break
-            fi
-            sleep 1
-        fi
-
         # run any prestart script while guest is fully down
         vm::prestart
 
-        # add install iso or disk image
+        # add install iso or disk image.
+        # -boot once=d boots this once, then falls through to the normal
+        # boot order (order=c, first hard disk) on any later internal
+        # reset - qemu handles the "installer -> boot from disk after
+        # install" transition on its own, no loop/reboot-detection needed
         if [ -n "${_iso}" ]; then
-            if echo "${_iso}" | grep -iqs '.iso$'; then
-                _iso_dev="-s ${_install_slot}:0,ahci-cd,${_iso},ro,bootindex=1"
+            if echo "${_iso}" | grep -iqs '\.iso$'; then
+                _iso_dev="-device ahci,id=ahci-install -drive id=installmedia,file=${_iso},format=raw,if=none,media=cdrom,readonly=on -device ide-cd,bus=ahci-install.0,drive=installmedia"
             else
-                _iso_dev="-s ${_install_slot}:0,ahci-hd,${_iso},ro"
+                _iso_dev="-device ahci,id=ahci-install -drive id=installmedia,file=${_iso},format=raw,if=none,readonly=on -device ide-hd,bus=ahci-install.0,drive=installmedia"
             fi
+            _boot_opt="-boot once=d,menu=off"
+        else
+            _iso_dev=""
+            _boot_opt="-boot order=c,menu=off"
         fi
-
-        # use null.iso if not an install and uefi firmware
-        # old instructions but some windows versions apparently needed this present
-        [ -z "${_iso}" -a "${_loader}" = "uefi" ] && config::yesno "nulliso_fix" && \
-            _iso_dev="-s ${_install_slot}:0,ahci-cd,${vm_dir}/.config/null.iso"
-
-        # reasonably ugly hack to remove wait option after first run
-        [ "${_run}" -eq "2" ] && vm::bhyve_device_fbuf_clear_wait
-
-        # load guest
-        if [ -z "${_uefi}" ]; then
-
-            guest::load "${_iso}"
-            _exit=$?
-
-            # check no errors
-            if [ ${_exit} -ne 0 ]; then
-                util::log "guest" "${_name}" "fatal; loader returned error ${_exit}"
-                break
-            fi
-        fi
-
-	if [ ${_bus} -ge 1 ]; then
-		_opts="${_opts} -Y"
-	fi
 
         #
         # from this line onward, no more changes in _opts
         #
 
         # resume if saved vm state found
-        set -- ${_opts} # convert _opts to a positional parameter
         if vm::has_saved_state "${_name}"; then
-            if util::check_bhyve_suspend; then
-                util::log "guest" "${_name}" "saved vm state found, resuming"
-                # there is no safe way to store a file path containing spaces in a string variable
-                # the shell treats the quotes (" or ') in below examples as literal chatacters
-                #   _opts="${_opts} -r \"${VM_DS_PATH}/${_name}/${_name}.save\""
-                #   _opts="${_opts} -r '${VM_DS_PATH}/${_name}/${_name}.save'"
-
-                # using positional parameters to handle paths that may contain spaces
-                set -- "$@" -r "${VM_DS_PATH}/${_name}/${_name}.save"
-            else
-                util::log "guest" "${_name}" \
-                    "saved vm state found but suspend/resume is unavailable or disabled, attempting to cold boot"
-            fi
+            util::log "guest" "${_name}" "saved vm state found, resuming"
+            _opts="${_opts} -incoming file:${VM_DS_PATH}/${_name}/${_name}.save"
         fi
 
-        util::log "guest" "${_name}" " [bhyve options: $*]" \
-          " [bhyve devices: ${_devices}]" \
-          " [bhyve console: ${_comstring}]"
-        [ -n "${_iso_dev}" ] && util::log "guest" "${_name}" " [bhyve iso device: ${_iso_dev}]"
-        util::log "guest" "${_name}" "starting bhyve (run ${_run})"
+        util::log "guest" "${_name}" " [qemu options: ${_opts}]" \
+          " [qemu devices: ${_devices}]" \
+          " [qemu console: ${_comstring}]"
+        [ -n "${_iso_dev}" ] && util::log "guest" "${_name}" " [qemu install device: ${_iso_dev}]"
+        util::log "guest" "${_name}" "starting qemu (run ${_run})"
 
-        # call rctl now as next line will block until bhyve exits
+        # call rctl now as next line will block until qemu exits
         rctl::set &
 
-        # actually run bhyve!
-        # we're already in the background so we just wait for it to exit.
-        # Devices must come before options due to how bhyve creates devices
-        # internally from the arguments.  -s must come before -o for any one
-        # device.
-        bhyve ${_devices} \
-              $@ \
-              ${_iso_dev} \
-              ${_comstring} \
-              ${_name} 2> "${_logpath}"
+        # actually run qemu!
+        # we're already in the background so we just wait for it to exit
+        qemu-system-x86_64 \
+            -name "${_name},process=qemu:${_name}" \
+            -pidfile "${VM_DS_PATH}/${_name}/${_name}.pid" \
+            -qmp "unix:${VM_DS_PATH}/${_name}/${_name}.qmp,server=on,wait=off" \
+            -monitor none \
+            ${_boot_opt} \
+            ${_opts} \
+            ${_devices} \
+            ${_iso_dev} \
+            ${_comstring} \
+            2> "${_logpath}"
 
-        # get bhyve exit code
+        # get qemu exit code
         _exit=$?
-        util::log "guest" "${_name}" "bhyve exited with status ${_exit}"
+        util::log "guest" "${_name}" "qemu exited with status ${_exit}"
 
         # remove any console sockets
-        rm ${VM_DS_PATH}/${_name}/vtcon.* >/dev/null 2>&1
+        rm -f ${VM_DS_PATH}/${_name}/vtcon.* >/dev/null 2>&1
+        rm -f "${VM_DS_PATH}/${_name}/${_name}.qmp" >/dev/null 2>&1
 
         # suspend
         [ -f "${VM_DS_PATH}/${_name}/suspending.lock" ] && break
@@ -262,17 +272,16 @@ vm::run(){
 
         util::log "guest" "${_name}" "restarting"
 
-        # remove install iso so guest reboots from disk
-        # after install non-uefi guests will still get install cd until a full shutdown+restart
-        # as we don't reset _iso_dev
+        # remove install iso so guest reboots from disk if this was an
+        # explicit 'vm restart' during an install
         _iso=""
         _run=$((_run + 1))
     done
 
     # destroy taps
-    for _devices in ${_taplist}; do
-        util::log "guest" "${_name}" "destroying network device ${_devices}"
-        ifconfig "${_devices}" destroy
+    for _tap in ${_taplist}; do
+        util::log "guest" "${_name}" "destroying network device ${_tap}"
+        ip link delete "${_tap}" >/dev/null 2>&1
     done
 
     if [ -e "${VM_DS_PATH}/${_name}/suspending.lock" ]; then
@@ -280,32 +289,44 @@ vm::run(){
     else
         util::log "guest" "${_name}" "stopped"
     fi
-    [ -e "/dev/vmm/${_name}" ] && bhyvectl --destroy --vm=${_name} >/dev/null 2>&1
+
+    # belt-and-suspenders: make sure nothing is left running under this pid
+    _pid=$(vm::getpid "${_name}")
+    if [ -n "${_pid}" ] && kill -0 "${_pid}" 2>/dev/null; then
+        kill -KILL "${_pid}" >/dev/null 2>&1
+    fi
+    rm -f "${VM_DS_PATH}/${_name}/${_name}.pid" "${VM_DS_PATH}/${_name}/${_name}.qmp" >/dev/null 2>&1
 
     vm::unlock
     exit ${_exit}
 }
 
-# creates options to use a uefi bootrom
+# creates options to use uefi firmware (OVMF)
+#
+# Linux: bhyve's proprietary BHYVE_UEFI*.fd blobs are replaced by OVMF,
+# the standard QEMU/KVM UEFI firmware (edk2 project). The exact install
+# path varies by distro:
+#   Debian/Ubuntu (package 'ovmf'):        /usr/share/OVMF/OVMF_{CODE,VARS}.fd
+#   Fedora/RHEL (package 'edk2-ovmf'):     /usr/share/edk2/ovmf/OVMF_{CODE,VARS}.fd
+#   Arch (package 'edk2-ovmf'):            /usr/share/edk2-ovmf/x64/OVMF_{CODE,VARS}.4m.fd
+# This defaults to the Debian/Ubuntu path - adjust below if you're on
+# something else. There's no direct OVMF equivalent of uefi-csm/uefi-devel
+# (CSM is a legacy-BIOS-compat layer that isn't part of a normal OVMF
+# build), so both fall back to the standard firmware with a warning.
 #
 # @modifies _opts _uefi
 #
 vm::uefi(){
-    local _bootrom
+    local _bootrom="/usr/share/OVMF/OVMF_CODE.fd"
+    local _vars_template="/usr/share/OVMF/OVMF_VARS.fd"
 
     case "${_loader}" in
-        uefi-devel)
-            _bootrom="/usr/local/share/uefi-firmware/BHYVE_UEFI_CODE-devel.fd"
-            ;;
-        uefi-csm)
-            _bootrom="/usr/local/share/uefi-firmware/BHYVE_UEFI_CSM.fd"
-            ;;
         uefi-custom)
-            _bootrom="${VM_DS_PATH}/.config/BHYVE_UEFI.fd"
-           ;;
-        *)
-           _bootrom="/usr/local/share/uefi-firmware/BHYVE_UEFI.fd"
-           ;;
+            _bootrom="${VM_DS_PATH}/.config/OVMF_CODE.fd"
+            ;;
+        uefi-csm|uefi-devel)
+            util::log "guest" "${_name}" "warning; '${_loader}' has no direct OVMF equivalent on Linux, using standard OVMF firmware instead"
+            ;;
     esac
 
     if [ ! -e "${_bootrom}" ]; then
@@ -313,53 +334,55 @@ vm::uefi(){
         exit 15
     fi
 
+    _opts="${_opts} -drive if=pflash,format=raw,readonly=on,file=${_bootrom}"
+
     # should we store uefi vars?
     if config::yesno "uefi_vars"; then
 
         # do we already have a storage file for this guest?
         if [ -e "${VM_DS_PATH}/${_name}/uefi-vars.fd" ]; then
             :
-        elif [ -e "/usr/local/share/uefi-firmware/BHYVE_UEFI_VARS.fd" ]; then
-            # create a copy and use
-            cp "/usr/local/share/uefi-firmware/BHYVE_UEFI_VARS.fd" "${VM_DS_PATH}/${_name}/uefi-vars.fd"
+        elif [ -e "${_vars_template}" ]; then
+            cp "${_vars_template}" "${VM_DS_PATH}/${_name}/uefi-vars.fd"
         else
-            util::log "guest" "${_name}" "fatal; unable to locate UEFI vars database or template"
+            util::log "guest" "${_name}" "fatal; unable to locate UEFI vars template ${_vars_template}"
             exit 15
         fi
 
-        _bootrom="${_bootrom},${VM_DS_PATH}/${_name}/uefi-vars.fd"
+        _opts="${_opts} -drive if=pflash,format=raw,file=${VM_DS_PATH}/${_name}/uefi-vars.fd"
     fi
 
-    _opts="${_opts} -l bootrom,${_bootrom}"
     _uefi="yes"
 }
 
-# decide how to handle bhyve exit code
+# decide how to handle a qemu exit code
+#
+# Linux/QEMU: this is a fundamentally different situation to bhyve. bhyve
+# exits every time the guest reboots, which is *why* the original inspects
+# the exit code to decide whether to relaunch it - that's how it implements
+# "reboot support" at all. QEMU handles a guest-initiated reboot internally
+# and just keeps running, so it only ever gets here because the guest
+# cleanly powered itself off (exit 0), or because we killed it (nonzero /
+# signal), or it crashed (nonzero). There's no "the guest wants to reboot"
+# exit code to catch anymore, so on_restart has nothing left to control -
+# the only remaining restart trigger is the explicit marker file that
+# core::restart drops before stopping the guest.
 #
 # @param string _var variable to put action into
-# @param int _code bhyve exit code
+# @param int _code qemu exit code
 #
 vm::handle_exit(){
     local _var="$1"
     local _code="$2"
 
-    # check exit code
-    # get relevant action from config, defaulting to the behaviour
-    # we'd normally expect. we don't currently allow overriding shutdown
-    # as it makes it impossible to actually stop a guest cleanly
-    #
-    case "${_code}" in
-        0) config::get "${_var}" "on_restart" "restart" ;;
-        1) ;&
-        2) if [ -e "${VM_DS_PATH}/${_name}/restart" ]; then
-               setvar "${_var}" "restart"
-               unlink "${VM_DS_PATH}/${_name}/restart" >/dev/null 2>&1
-           else
-               setvar "${_var}" "shutdown"
-           fi
-           ;;
-        *) config::get "${_var}" "on_fault" "shutdown" ;;
-    esac
+    if [ "${_code}" = "0" ] && [ -e "${VM_DS_PATH}/${_name}/restart" ]; then
+        setvar "${_var}" "restart"
+        unlink "${VM_DS_PATH}/${_name}/restart" >/dev/null 2>&1
+    elif [ "${_code}" = "0" ]; then
+        setvar "${_var}" "shutdown"
+    else
+        config::get "${_var}" "on_fault" "shutdown"
+    fi
 }
 
 # lock a vm
@@ -382,18 +405,17 @@ vm::unlock(){
     unlink "${VM_DS_PATH}/${_name}/console" >/dev/null 2>&1
 }
 
-# create string for guest com ports
-# this builds the '-l comX' part of the bhyve command into _comstring
-# _com is used by bhyveload|grub_bhyve so we set that to the first
-# com port we come across.
-# The nmdm devices are written to $vm_dir/{guest}/console so we can
-# read them back later for the 'vm console' command
+# create the qemu chardev/device string for guest com ports.
 #
-# @modifies _com _comstring
+# Linux: no nmdm here - each com port becomes a unix socket chardev.
+# core::console (vm-core.sh) already expects to find that socket path in
+# $vm_dir/{guest}/console and connect to it with socat, so the format
+# written to that file ("port=path") must stay exactly as it is.
 #
-vm::bhyve_device_comports(){
-    local _port _num=1 _tmux_name
-    local _port_name
+# @modifies _comstring
+#
+vm::qemu_device_comports(){
+    local _port _num=1 _tmux_name _port_name
 
     unlink "${VM_DS_PATH}/${_name}/console" >/dev/null 2>&1
 
@@ -405,77 +427,37 @@ vm::bhyve_device_comports(){
                 echo "${_port}=tmux/${_tmux_name}" >> "${VM_DS_PATH}/${_name}/console"
             fi
 
-            # if foreground mode, we don't configure a serial port
+            # if foreground mode, attach this port straight to our stdio
             if [ -n "${VM_OPT_FOREGROUND}" ]; then
-                _comstring="-l ${_port},stdio"
+                _comstring="-chardev stdio,id=${_port},signal=off -device isa-serial,chardev=${_port}"
                 _num=$((_num + 1))
                 continue
             fi
         fi
 
-        # generate a port name unique to this vm and port number
-        _port_name="/dev/nmdm-${_name}.${_num}"
+        # unix socket chardev, one per com port
+        _port_name="${VM_DS_PATH}/${_name}/${_name}.${_port}"
+        rm -f "${_port_name}" >/dev/null 2>&1
 
-        # use first com port for the loader
-        [ ${_num} -eq 1 ] && _com="${_port_name}A"
-
-        echo "${_port}=${_port_name}B" >> "${VM_DS_PATH}/${_name}/console"
-        _comstring="${_comstring}${_comstring:+ }-l ${_port},${_port_name}A"
+        echo "${_port}=${_port_name}" >> "${VM_DS_PATH}/${_name}/console"
+        _comstring="${_comstring}${_comstring:+ }-chardev socket,id=${_port},path=${_port_name},server=on,wait=off -device isa-serial,chardev=${_port}"
         _num=$((_num + 1))
     done
 }
 
-# get bhyve device string for basic devices
-# hostbridge & lpc on their own slots
-# windows requires slot 0 & 31, nothing else cares fortunately
+# get qemu device string for disk devices
+#
+# Linux: no PCI slot/bus/func bookkeeping needed - qemu auto-addresses
+# everything, so this is considerably simpler than the bhyve version (and
+# the ahci_device_limit "pack N disks onto one controller to save slots"
+# optimisation doesn't apply either - every ahci-hd/ahci-cd disk just gets
+# its own small ahci controller, since PCI addresses aren't scarce here).
 #
 # @modifies _devices
 #
-vm::bhyve_device_basic(){
+vm::qemu_device_disks(){
+    local _disk _type _dev _path _opts _num=0
 
-    # add hostbridge
-    case "$_hostbridge" in
-        no*) ;;
-        amd) _devices="-s 0,amd_hostbridge" ;;
-        *)   _devices="-s 0,hostbridge" ;;
-    esac
-
-    # lpc
-    _devices="${_devices}${_devices:+ }-s 31,lpc${_fwcfg:+,fwcfg=$_fwcfg}"
-}
-
-# get bhyve device string for disk devices
-# read all disks starting at 0 and add to the _devices string
-# this is done first so disks will start at slot 4. For uefi,
-# we move through slots and stop at slot 6. For non-uefi we
-# step through all functions and just keep going
-#
-# since r302459 the ahci controller supports
-# up to 32 devices per controller. by default we set
-# the device limit to 1 and use the original syntax, but
-# this can be overridden by setting the ahci_device_limit
-# guest option to an integer between 2 and 32.
-#
-# @modifies _devices _slot _bus
-#
-vm::bhyve_device_disks(){
-    local _disk _type _dev _path _opts _ahci _atype
-    local _ahci_num=0 _num=0 _add _ahci_multi
-    local _ahci_limit=1
-
-    # check if user has set a per-controller device limit
-    config::get "_ahci_multi" "ahci_device_limit"
-
-    if [ -n "${_ahci_multi}" ]; then
-
-        # see if it's numeric
-        echo "${_ahci_multi}" | egrep -iqs '^[0-9]+$'
-
-        [ $? -eq 0 -a ${_ahci_multi} -gt 1 -a ${_ahci_multi} -le 32 ] && \
-            _ahci_limit="${_ahci_multi}"
-    fi
-
-    # get all disks
     while true; do
         config::get "_disk" "disk${_num}_name"
         config::get "_type" "disk${_num}_type"
@@ -484,158 +466,84 @@ vm::bhyve_device_disks(){
         config::get "_dev" "disk${_num}_dev"
         config::get "_opts" "disk${_num}_opts"
 
-        if [ ${_func} -ge 8 ]; then
-            _func=0
-            _slot=$((_slot + 1))
-        fi
-	if [ ${_slot} -ge ${_maxslots} ]; then
-	    _slot=0
-	    _bus=$((_bus + 1))
-            _maxslots=32
-        fi
-
         vm::get_disk_path "_path" "${_name}" "${_disk}" "${_dev}"
 
-        # ahci device and multi mode?
-        if [ ${_ahci_limit} -gt 1 -a "${_type%%-*}" = "ahci" ]; then
-
-            # check device type
-            case "${_type}" in
-                ahci-cd)
-                    _atype="cd"
-                    ;&
-                ahci-hd)
-                    [ -z "${_atype}" ] && _atype="hd"
-                    _ahci="${_ahci},${_atype}:${_path}"
-                    [ -n "${_opts}" ] && _ahci="${_ahci},${_opts}"
-                    _ahci_num=$((_ahci_num + 1))
-
-                    # we need to move to another controller if we get to the limit
-                    if [ ${_ahci_num} -ge ${_ahci_limit} ]; then
-                        _devices="${_devices} -s ${_bus}:${_slot}:${_func},ahci${_ahci}"
-                        _ahci=""
-                        _ahci_num=0
-                        _add=1
-                    fi
-                    ;;
-            esac
-
-            _atype=""
-        else
-
-            _devices="${_devices} -s ${_bus}:${_slot}:${_func},${_type},${_path}"
-            [ -n "${_opts}" ] && _devices="${_devices},${_opts}"
-            _add=1
-        fi
-
-        # have we just added a device?
-        if [ -n "${_add}" ]; then
-            if [ -n "${_uefi}" ]; then
-                _slot=$((_slot + 1))
-
-            else
-                _func=$((_func + 1))
-            fi
-
-            _add=""
-        fi
-
-	if [ ${_slot} -ge ${_maxslots} ]; then
-	    _slot=0
-	    _bus=$((_bus + 1))
-	    _maxslots=32
-        fi
+        case "${_type}" in
+            ahci-hd)
+                _devices="${_devices} -device ahci,id=ahci${_num}"
+                _devices="${_devices} -drive id=disk${_num},file=${_path},format=raw,if=none"
+                _devices="${_devices} -device ide-hd,bus=ahci${_num}.0,drive=disk${_num}${_opts:+,${_opts}}"
+                ;;
+            ahci-cd)
+                _devices="${_devices} -device ahci,id=ahci${_num}"
+                _devices="${_devices} -drive id=disk${_num},file=${_path},format=raw,if=none,media=cdrom,readonly=on"
+                _devices="${_devices} -device ide-cd,bus=ahci${_num}.0,drive=disk${_num}"
+                ;;
+            nvme)
+                _devices="${_devices} -drive id=disk${_num},file=${_path},format=raw,if=none"
+                _devices="${_devices} -device nvme,drive=disk${_num},serial=disk${_num}${_opts:+,${_opts}}"
+                ;;
+            virtio-blk|*)
+                [ "${_type}" != "virtio-blk" ] && \
+                    util::log "guest" "${_name}" "warning; unrecognised disk type '${_type}' for disk${_num}, defaulting to virtio-blk"
+                _devices="${_devices} -drive id=disk${_num},file=${_path},format=raw,if=none,cache=writeback,discard=unmap"
+                _devices="${_devices} -device virtio-blk-pci,drive=disk${_num}${_opts:+,${_opts}}"
+                ;;
+        esac
 
         _num=$((_num + 1))
     done
-
-    # have ahci devices left?
-    if [ -n "${_ahci}" ]; then
-        _devices="${_devices} -s ${_slot}:${_func},ahci${_ahci}"
-        [ -n "${_uefi}" ] && _slot=$((_slot + 1))
-    fi
-
-    # move to next slot if we have devices
-    # unless uefi as we already inc slot in uefi mode
-    if [ ${_num} -ge 1 -a -z "${_uefi}" ]; then
-        _slot=$((_slot + 1))
-        _func=0
-    fi
-    if [ ${_slot} -ge ${_maxslots} ]; then
-	_slot=0
-	_bus=$((_bus + 1))
-	_maxslots=32
-    fi
 }
 
-# get bhyve device string for networking
-# we dynamically create a new tap device for each interface
-# if we can find the correct bridge, we then add the tap as a member
-# we add each tap to __taplist from vm::run which it will
-# use to desstroy them all on shutdown
+# get qemu device string for networking.
+# actual tap creation/tagging and building the -netdev/-device args for
+# each interface is switch::provision's job (delegates to
+# switch::standard::provision et al, in the not-yet-ported vm-switch-*
+# files) - this just drives the loop, same as the original.
 #
-# @modifies _devices _slot _bus _taplist _func
+# @modifies _taplist (populated by switch::provision)
 #
-vm::bhyve_device_networking(){
+vm::qemu_device_networking(){
     local _emulation _num=0
 
     while true; do
         config::get "_emulation" "network${_num}_type"
         [ -z "${_emulation}" ] && break
 
-        # move slot if we've hit function 8
-        if [ ${_func} -ge 8 ]; then
-            _func=0
-            _slot=$((_slot + 1))
-        fi
-	if [ ${_slot} -ge ${_maxslots} ]; then
-	    _slot=0
-	    _bus=$((_bus + 1))
-	    _maxslots=32
-        fi
-
         switch::provision
         _num=$((_num + 1))
     done
-
-    if [ ${_num} -ge 1 ]; then
-        _slot=$((_slot + 1))
-        _func=0
-    fi
-    if [ ${_slot} -ge ${_maxslots} ]; then
-        _slot=0
-        _bus=$((_bus + 1))
-	_maxslots=32
-    fi
 }
 
-# check if user wants a virtio-rand device
+# check if user wants a virtio-rng device
 #
-# @modifies _devices _slot
+# @modifies _devices
 #
-vm::bhyve_device_rand(){
-
+vm::qemu_device_rand(){
     if config::yesno "virt_random"; then
-        _devices="${_devices} -s ${_bus}:${_slot}:0,virtio-rnd"
-        _slot=$((_slot + 1))
-    fi
-    if [ ${_slot} -ge ${_maxslots} ]; then
-        _slot=0
-        _bus=$((_bus + 1))
-	_maxslots=32
+        _devices="${_devices} -object rng-random,id=rng0,filename=/dev/urandom -device virtio-rng-pci,rng=rng0"
     fi
 }
 
-# add frame buffer output
+# add vnc + graphics adapter
 #
-vm::bhyve_device_fbuf(){
-    local _port _listen _res _pass _vga _wait
-    local _fbuf_conf
+# Linux/QEMU caveats vs bhyve's fbuf device:
+#  - graphics_res isn't directly settable the way bhyve's w=/h= is - the
+#    guest OS picks its own resolution once booted. Logged as a warning
+#    rather than silently ignored.
+#  - "wait" can't auto-resume on client connect the way bhyve's fbuf,wait
+#    does - the closest we can do is start the CPU paused (-S) and leave
+#    resuming it (via QMP 'cont') up to you once you've connected.
+#
+# @modifies _devices
+#
+vm::qemu_device_fbuf(){
+    local _port _listen _res _pass _vga _wait _display
 
-    # only works in uefi mode
+    # only works in uefi mode (matches the original - fbuf needs a real
+    # graphics-capable firmware path)
     [ -z "${_uefi}" ] && return 0
 
-    # check graphics enabled
     ! config::yesno "graphics" && return 0
 
     config::get "_port" "graphics_port"
@@ -645,12 +553,8 @@ vm::bhyve_device_fbuf(){
     config::get "_pass" "vnc_password"
     config::get "_wait" "graphics_wait" "auto"
 
-    # check if graphics_wait is auto
-    # auto will count as yes so we need to unset it if we're not in an install.
     [ "${_wait}" = "auto" -a -z "${_iso}" ] && _wait="no"
 
-    # try to get port
-    # return if we can't
     if [ -z "${_port}" ]; then
         vm::find_available_net_port "_port" "5900"
 
@@ -662,170 +566,108 @@ vm::bhyve_device_fbuf(){
         util::log "guest" "${_name}" "dynamically allocated port ${_port} for vnc connections"
     fi
 
-    # add ip, port, resolution, wait
-    _fbuf_conf="tcp=${_listen:-0.0.0.0}:${_port}"
-    [ -n "${_res}" ] && _fbuf_conf="${_fbuf_conf},w=${_res%%x*},h=${_res##*x}"
-    [ -n "${_vga}" ] && _fbuf_conf="${_fbuf_conf},vga=${_vga}"
-    [ -n "${_pass}" ] && _fbuf_conf="${_fbuf_conf},password=${_pass}"
-    util::yesno "${_wait}" && _fbuf_conf="${_fbuf_conf},wait"
+    # qemu's -vnc takes a display number, not a raw port (port = 5900 + display)
+    _display=$((_port - 5900))
+
+    if [ -n "${_pass}" ]; then
+        _devices="${_devices} -object secret,id=vnc-pw-${_name},data=${_pass}"
+        _devices="${_devices} -vnc ${_listen:-0.0.0.0}:${_display},password-secret=vnc-pw-${_name}"
+    else
+        _devices="${_devices} -vnc ${_listen:-0.0.0.0}:${_display}"
+    fi
+
+    _devices="${_devices} -device ${_vga:-VGA}"
+
+    [ -n "${_res}" ] && \
+        util::log "guest" "${_name}" "warning; graphics_res has no qemu equivalent - set the resolution from inside the guest"
+
+    util::yesno "${_wait}" && _opts="${_opts} -S"
 
     # write vnc port to console data
     echo "vnc=${_listen:-0.0.0.0}:${_port}" >> "${VM_DS_PATH}/${_name}/console"
-
-    # add device
-    _devices="${_devices} -s ${_bus}:${_slot}:0,fbuf,${_fbuf_conf}"
-    _slot=$((_slot + 1))
-    if [ ${_slot} -ge ${_maxslots} ]; then
-        _slot=0
-        _bus=$((_bus + 1))
-	_maxslots=32
-    fi
 }
 
-# remove wait option if we're in auto mode
-# fairly ugly code that uses sed to look for ",wait{word boundary}"
-# and removes it. Hopefully this will never match anything else in
-# the device string...
+# add a usb tablet (absolute pointer) device
 #
 # @modifies _devices
 #
-vm::bhyve_device_fbuf_clear_wait(){
-    local _wait
-
-    [ -z "${_uefi}" ] && return
-
-    config::get "_wait" "graphics_wait" "auto"
-    [ "${_wait}" = "auto" ] && _devices=$(echo "${_devices}" | sed 's@,wait[[:>:]]@@')
-}
-
-# add a xhci mouse device
-#
-vm::bhyve_device_mouse(){
-
-    # add a tablet device if enabled
+vm::qemu_device_mouse(){
     if config::yesno "xhci_mouse"; then
-        _devices="${_devices} -s ${_bus}:${_slot}:0,xhci,tablet"
-        _slot=$((_slot + 1))
-    fi
-    if [ ${_slot} -ge ${_maxslots} ]; then
-        _slot=0
-        _bus=$((_bus + 1))
-	_maxslots=32
+        _devices="${_devices} -device qemu-xhci,id=xhci0 -device usb-tablet,bus=xhci0.0"
     fi
 }
 
-vm::bhyve_device_sound(){
-    local _play _rec
-    config::get "_play" "sound_play" "/dev/dsp0"
-    config::get "_rec" "sound_rec"
-
+# add an audio device
+#
+# Linux: best-effort - assumes pipewire is available on the host. If your
+# host uses pulseaudio or plain alsa instead, change the -audiodev driver
+# below (driver=pa or driver=alsa respectively).
+#
+# @modifies _devices
+#
+vm::qemu_device_sound(){
     if config::yesno "sound"; then
-        _devices="${_devices} -s ${_bus}:${_slot}:0,hda,play=${_play}"
-
-        if [ -n "${_rec}" ]; then
-            _devices="${_devices},rec=${_rec}"
-        fi
-
-        _slot=$((_slot + 1))
-    fi
-    if [ ${_slot} -ge ${_maxslots} ]; then
-        _slot=0
-        _bus=$((_bus + 1))
-	_maxslots=32
+        _devices="${_devices} -audiodev pipewire,id=snd0 -device ich9-intel-hda -device hda-duplex,audiodev=snd0"
     fi
 }
 
-# add virtio_console devices to the guest
+# add virtio-console devices to the guest
 #
-# @modifies _devices _slot
+# Linux: each named port becomes a unix socket chardev at the same
+# $vm_dir/{guest}/vtcon.<port> path the original used - info::guest_vtcon
+# (vm-info.sh) already expects that exact path, so it's kept as-is.
 #
-vm::bhyve_device_console(){
-    local _console _curr=0
-    local _dev_str
+# @modifies _devices
+#
+vm::qemu_device_console(){
+    local _console _curr=0 _portpath
 
     config::get "_console" "virt_console0"
     [ -z "${_console}" ] && return 0
 
-    # add ports
+    _devices="${_devices} -device virtio-serial-pci,id=vioserial0"
+
     while [ -n "${_console}" -a ${_curr} -lt 16 ]; do
-         # if set to "yes/on/1", just use the console number as port name
-         case "${_console}" in
-             [Yy][Ee][Ss]|[Oo][Nn]|1) _console="${_curr}" ;;
-         esac
+        # if set to "yes/on/1", just use the console number as port name
+        case "${_console}" in
+            [Yy][Ee][Ss]|[Oo][Nn]|1) _console="${_curr}" ;;
+        esac
 
-         _dev_str="${_dev_str},${_console}=${VM_DS_PATH}/${_name}/vtcon.${_console}"
+        _portpath="${VM_DS_PATH}/${_name}/vtcon.${_console}"
+        rm -f "${_portpath}" >/dev/null 2>&1
 
-         _curr=$((_curr + 1))
-         config::get "_console" "virt_console${_curr}"
+        _devices="${_devices} -chardev socket,id=vtcon${_curr},path=${_portpath},server=on,wait=off"
+        _devices="${_devices} -device virtserialport,chardev=vtcon${_curr},bus=vioserial0.0,name=${_console}"
+
+        _curr=$((_curr + 1))
+        config::get "_console" "virt_console${_curr}"
     done
-
-    _devices="${_devices} -s ${_bus}:${_slot}:0,virtio-console${_dev_str}"
-    _slot=$((_slot + 1))
-    if [ ${_slot} -ge ${_maxslots} ]; then
-        _slot=0
-        _bus=$((_bus + 1))
-	_maxslots=32
-    fi
 }
 
 # get any pci passthrough devices
 #
-# pci passthru requires guest memory to be wired so update _opts
-# in that case if we have any pass through devices
-# see also usr.sbin/bhyve/pci_passthru.c
+# Linux: passthru devices are written as a PCI address matching the host's
+# /sys/bus/pci/devices naming (bus:dev.func, or domain:bus:dev.func) rather
+# than bhyve's slot/bus/func triples, and the device must already be bound
+# to the vfio-pci driver on the host before starting the guest - this
+# script doesn't do that binding for you.
 #
-# @modifies _devices _slot _bus _opts _wiredmem
+# @modifies _devices _opts
 #
-vm::bhyve_device_passthru(){
-    local _dev _options _orig_slot _func=0
-    local _last_orig_slot
-    local _num=0
+vm::qemu_device_passthru(){
+    local _dev _options _num=0
 
     while true; do
         config::get "_dev" "passthru${_num}"
         config::get "_options" "passthru${_num}_options"
         [ -z "${_dev}" ] && break
 
-        # see if there's an = sign
-        # we allow A/B/C=D:E to force D:E as the guest SLOT:FUNC
-        if echo "${_dev}" | grep -qs "="; then
-            _devices="${_devices} -s ${_bus}:${_dev##*=},passthru,${_dev%%=*}${_options:+,${_options}}"
-        else
-            _orig_slot=${_dev%%/*}
-
-            # only move to new slot if the original device is on a different slot to the last one.
-            # if user wants to passthru a device that has multiple functions which must stay together
-            # on one slot, they should be together in configuration file
-            if [ -n "${_last_orig_slot}" -a "${_last_orig_slot}" != "${_orig_slot}" ]; then
-                _slot=$((_slot + 1))
-                _func=0
-            fi
-
-        if [ ${_slot} -ge ${_maxslots} ]; then
-            _slot=0
-            _bus=$((_bus + 1))
-	    _maxslots=32
-        fi
-
-            _devices="${_devices} -s ${_bus}:${_slot}:${_func},passthru,${_dev}${_options:+,${_options}}"
-            _last_orig_slot=${_orig_slot}
-            _func=$((_func + 1))
-        fi
-
+        _devices="${_devices} -device vfio-pci,host=${_dev}${_options:+,${_options}}"
         _num=$((_num + 1))
     done
 
-    if [ ${_num} -ge 1 ]; then
-        _slot=$((_slot + 1))
-
-        # passthru requires guest memory to be wired
-        _opts="${_opts} -S" && _wiredmem="1"
-    fi
-    if [ ${_slot} -ge ${_maxslots} ]; then
-        _slot=0
-        _bus=$((_bus + 1))
-	_maxslots=32
-    fi
+    # passthrough needs the guest's memory locked in place for DMA
+    [ ${_num} -ge 1 ] && _opts="${_opts} -overcommit mem-lock=on"
 }
 
 # get the path to a disk image depending on type.
@@ -835,6 +677,11 @@ vm::bhyve_device_passthru(){
 # the following
 # diskX_dev="custom"
 # diskX_name="/full/path/to/disk/device/or/file"
+#
+# unchanged from the original - none of this is FreeBSD-specific. zvol
+# paths (/dev/zvol/<dataset>) are identical under OpenZFS on Linux, and
+# the iscsi/custom/default cases just build a path or delegate elsewhere
+# (see info::__find_iscsi in vm-info.sh for the Linux iscsi lookup).
 #
 # @param string _var variable to put disk path into
 # @param string _name the name of the guest
@@ -861,6 +708,8 @@ vm::get_disk_path(){
 #
 # script is given the guest name and full path as arguments
 #
+# unchanged - just runs an external script, nothing FreeBSD-specific
+#
 vm::prestart(){
     local _script
 
@@ -878,24 +727,30 @@ vm::prestart(){
 }
 
 # get a list of all running virtual machines
-# this loads a list of all running guests into global variables
-# both variables are in the following format with one guest per line
-# "pid guest"
+# this loads a list of all running guests into a global variable,
+# one guest per line, in the format "pid guest"
 #
-# VM_RUN_BHYVE = all running bhyve instances
-# VM_RUN_LOAD  = all loading guests (bhyveload|grub-bhyve)
+# Linux/QEMU: there's no separate bootloader phase (bhyveload/grub-bhyve) -
+# qemu boots guests directly, so there's nothing for VM_RUN_LOAD to hold;
+# it's kept (always empty) purely so vm::running_check doesn't need
+# touching. Guest identity comes from the qemu process's "-name" argument,
+# same convention core::stopall (vm-core.sh) already relies on.
 #
 # @modifies VM_RUN_BHYVE VM_RUN_LOAD
 #
 vm::running_load(){
-    VM_RUN_BHYVE=$(pgrep -fl "bhyve:" | awk '{print $1,$NF}')
-    VM_RUN_LOAD=$(pgrep -fl "grub-bhyve|bhyveload" | awk '{print $1,$NF}')
+    VM_RUN_BHYVE=$(
+        ps -eo pid=,args= | \
+        sed -n 's/^[[:space:]]*\([0-9][0-9]*\)[[:space:]].*-name[[:space:]]\+\([^,[:space:]]*\).*/\1 \2/p'
+    )
+    VM_RUN_LOAD=""
 }
 
 # see if a specific virtual machine is running
-# we search the VM_RUN_BHYVE and VM_RUN_LOAD variables looking for the
-# specified guest. If found we output "Running" or "Bootloader", along with
-# the PID. If not running we output "Stopped"
+# we search VM_RUN_BHYVE (and, for original-behaviour compatibility,
+# VM_RUN_LOAD, which is always empty here - see vm::running_load) looking
+# for the specified guest. If found we output "Running" along with the
+# PID; if not running we output "Suspended" or "Stopped"
 #
 # @param string _var variable to put result into
 # @param string _name name of the guest to look for
@@ -916,14 +771,6 @@ vm::running_check(){
         fi
     done
 
-    for _entry in ${VM_RUN_LOAD}; do
-        if [ "${_entry##* }" = "${_name}" ]; then
-            setvar "${_var}" "Bootloader (${_entry%% *})"
-            setvar "${_var2}" "${_entry%% *}"
-            return 0
-        fi
-    done
-
     datastore::get_guest "${_name}"
 
     if vm::has_saved_state "${_name}"; then
@@ -937,18 +784,19 @@ vm::running_check(){
 
 # make sure a virtual machine is not running
 # display warning if it is. up to caller to decide whether to continue.
-# on unclean shutdown, lock files may not be cleared up by vm-bhyve,
-# we now provide option to skip the lock file if it references this host,
-# and there is no /dev/vmm/{_name}.
+#
+# Linux/QEMU: no /dev/vmm to check - "running locally" now means a live
+# pid in the guest's .pid file, same source of truth core::stop/core::console
+# (vm-core.sh) already use.
 #
 # @param string _name the guest name
-# @param int _skip_lock skip local lock file if no /dev/vmm found
+# @param int _skip_lock skip local lock file if guest isn't actually running
 # @return success if not running
 #
 vm::confirm_stopped(){
     local _name="$1"
     local _skip_lock="$2"
-    local _host _our_host
+    local _host _our_host _pid
 
     _our_host=$(hostname)
 
@@ -964,8 +812,9 @@ vm::confirm_stopped(){
     fi
 
     # check local machine, just in case guest run manually
-    if [ -e "/dev/vmm/${_name}" ]; then
-        util::warn "${_name} appears to be running locally (vmm exists)"
+    _pid=$(vm::getpid "${_name}")
+    if [ -n "${_pid}" ] && kill -0 "${_pid}" 2>/dev/null; then
+        util::warn "${_name} appears to be running locally (pid ${_pid})"
         return 1
     fi
 
@@ -974,6 +823,8 @@ vm::confirm_stopped(){
 
 #
 # check if the virtual machine has saved state
+#
+# unchanged - plain file existence check, nothing FreeBSD-specific
 #
 # @param string _name the guest name
 # @return success if the guest has saved state
@@ -986,30 +837,31 @@ vm::has_saved_state(){
 }
 
 # generate a static mac address for a guest.
-# we now make sure all interfaces have a static mac so
-# there's no worry of guest problems due to it changing.
-# bhyve is allocated 58:9c:fc:0x:xx:xx, so we try and
-# randomise the last 20 bits (5 hex digits).
+#
+# Linux/QEMU: 58:9c:fc is bhyve's registered OUI - swapped for 52:54:00,
+# the long-standing QEMU/KVM convention (same one libvirt's default
+# networks use), so guests are recognisable as qemu VMs and won't collide
+# with anything using the bhyve range.
 #
 vm::generate_static_mac(){
-    # device identifier part of MAC address
     local _dev_id=""
 
-    # generate device identifier part
-    # 00:00:00 must not be used (see sys/net/ieee_oui.h)
     while [ -z "${_dev_id}" -o "${_dev_id}" = "00:00:00" ]; do
           _dev_id=$(openssl rand -hex 3 | sed 's/../&:/g; s/^./0/; s/:$//')
     done
 
-    # add base bhyve OUI
-    _mac="58:9c:fc:${_dev_id}"
+    _mac="52:54:00:${_dev_id}"
 
     util::log "guest" "${_name}" "generated static mac ${_mac}"
     config::set "${_name}" "network${_num}_mac" "${_mac}"
 }
 
 # try to find an available network port to listen on
-# this isn't clever enough to diffeential ports on unique ip's yet
+# this isn't clever enough to differentiate ports on unique ip's yet
+#
+# Linux: ss (iproute2) instead of netstat (net-tools, often not installed
+# by default anymore). Also note BSD netstat prints "addr.port" (dot before
+# the port); Linux tools use "addr:port" (colon) - hence -F: not -F.
 #
 # @param string _var variable to put port into
 # @param int _curr the port to start searching from
@@ -1021,23 +873,17 @@ vm::find_available_net_port(){
     local _open _line _max _used
     local IFS=$'\n'
 
-    # stop searching after 200 ports
     _max=$((_curr + 200))
 
-    # get list of open ports
-    _open=$(netstat -an | grep LISTEN | awk '{print $4}' | awk -F. '{print $NF}')
+    _open=$(ss -tln 2>/dev/null | awk 'NR>1{print $4}' | awk -F: '{print $NF}')
 
     while [ "${_curr}" -lt "${_max}" ]; do
-
-        # reset used flag
         _used=""
 
-        # see if current port is used
         for _line in ${_open}; do
             [ "${_line}" = "${_curr}" ] && _used="1"
         done
 
-        # this port available?
         if [ -z "${_used}" ]; then
             setvar "${_var}" "${_curr}"
             return 0
@@ -1046,7 +892,6 @@ vm::find_available_net_port(){
         _curr=$((_curr + 1))
     done
 
-    # not found a port
     setvar "${_var}" ""
     return 1
 }
@@ -1055,8 +900,7 @@ vm::find_available_net_port(){
 # such as uuid and mac addresses. these should be generated
 # automatically at runtime
 #
-# used for cloning or imaging existing guests
-# should this remove devices like passthru that cannot be shared?
+# unchanged - pure config file manipulation, nothing FreeBSD-specific
 #
 # @param string _name name of guest to generalise
 #
@@ -1078,7 +922,12 @@ vm::generalise(){
 
 # get number of cpus from the configuration file, and also
 # look for sockets/cores/threads options.
-# returns the bhyve cpu config string
+# returns the qemu -smp configuration string
+#
+# unchanged - qemu's "-smp N,sockets=X,cores=Y,threads=Z" syntax happens
+# to be the same shape as bhyve's "-c N,sockets=X,cores=Y,threads=Z", so
+# this needed no changes at all - just prefix the result with -smp instead
+# of -c where it's used (see vm::run).
 #
 # @param string _var variable to put cpu configuration into
 #

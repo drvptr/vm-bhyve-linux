@@ -1,20 +1,22 @@
 #!/bin/sh
 # SPDX-License-Identifier: BSD-2-Clause
 # SPDX-FileCopyrightText: 2018 Matt Churchyard <churchers@gmail.com>
+# SPDX-FileCopyrightText: 2026 Petr Derbyshev <drvpotr@gmail.com>
 
 VERSION=1.8-devel
-VERSION_BSD=$(uname -K)
+VERSION_OS=$(uname -s)
 PATH=${PATH}:/bin:/usr/bin:/usr/local/bin:/sbin:/usr/sbin:/usr/local/sbin
 
-. /etc/rc.subr
-load_rc_config "vm"
+#I don't know what to replace it with. Commented.
+#. /etc/rc.subr
+#load_rc_config "vm"
 
 # check informational commands
 cmd::parse_info "$@"
 
 # we should be enabled in rc.conf
 # or call it using forcestart
-[ -z "$rc_force" ] && ! checkyesno vm_enable && util::err "\$vm_enable is not enabled in /etc/rc.conf!"
+#[ -z "$rc_force" ] && ! checkyesno vm_enable && util::err "\$vm_enable is not enabled in /etc/rc.conf!"
 
 # check we can run bhyve
 util::check_bhyve_support

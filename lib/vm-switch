@@ -1,13 +1,19 @@
 #!/bin/sh
 # SPDX-License-Identifier: BSD-2-Clause
 # SPDX-FileCopyrightText: 2016 Matt Churchyard <churchers@gmail.com>
+# SPDX-FileCopyrightText: 2026 Petr Derbyshev <drvpotr@gmail.com>
 
 # switch libraries
 #
-. "${LIB}/vm-switch-netgraph"
+# VALE (netmap) and netgraph are FreeBSD kernel-specific technologies
+# with no Linux equivalent, so those switch types aren't offered in
+# this port - there's nothing to source for them, and sourcing a
+# nonexistent file here would break every 'vm' invocation, not just
+# switch commands. 'standard' (linux bridge) and 'vxlan' (also a real
+# Linux feature) still need their own lib files - just not shown here.
+#
 . "${LIB}/vm-switch-manual"
 . "${LIB}/vm-switch-standard"
-. "${LIB}/vm-switch-vale"
 . "${LIB}/vm-switch-vxlan"
 
 # create switches from rc list on init
@@ -28,8 +34,13 @@ switch::init(){
             case "${_type}" in
                 vxlan)    switch::vxlan::init "${_switch}" ;;
                 manual)   switch::manual::init "${_switch}" ;;
-                vale)     ;;
-                netgraph) ;;
+                vale|netgraph)
+                    # non-fatal: this loop covers every switch on the
+                    # host, one unsupported entry (e.g. a leftover from
+                    # a migrated FreeBSD config) shouldn't stop the
+                    # rest from coming up
+                    util::warn "switch ${_switch} is type '${_type}', which isn't supported on Linux - skipping"
+                    ;;
                 *)        switch::standard::init "${_switch}" ;;
             esac
         done
@@ -53,10 +64,13 @@ switch::list(){
                 config::core::get "_type" "type_${_switch}"
 
                 case "${_type}" in
-                    netgraph) switch::netgraph::show "${_switch}" "${_format}" ;;
-                    vale)     switch::vale::show "${_switch}" "${_format}" ;;
                     vxlan)    switch::vxlan::show "${_switch}" "${_format}" ;;
                     manual)   switch::manual::show "${_switch}" "${_format}" ;;
+                    vale|netgraph)
+                        # same reasoning as switch::init - flag it in
+                        # the table instead of aborting the whole listing
+                        printf "${_format}" "${_switch}" "${_type}" "unsupported-on-linux" "-" "-" "-" "-" "-"
+                        ;;
                     *)        switch::standard::show "${_switch}" "${_format}" ;;
                 esac
             done
@@ -124,9 +138,10 @@ switch::create(){
     case "${_type}" in
         standard) switch::standard::create ;;
         manual)   switch::manual::create ;;
-        netgraph) switch::netgraph::create ;;
-        vale)     switch::vale::create ;;
         vxlan)    switch::vxlan::create ;;
+        vale|netgraph)
+            util::err "switch type '${_type}' is not supported on Linux"
+            ;;
         *)        util::err "invalid switch type - '${_type}'" ;;
     esac
 }
@@ -148,9 +163,10 @@ switch::remove(){
     case "${_type}" in
         standard) switch::standard::remove "${_switch}" ;;
         manual)   switch::manual::remove "${_switch}" ;;
-        netgraph) switch::netgraph::remove "${_switch}" ;;
-        vale)     switch::vale::remove "${_switch}" ;;
         vxlan)    switch::vxlan::remove "${_switch}" ;;
+        vale|netgraph)
+            util::err "switch type '${_type}' is not supported on Linux"
+            ;;
         *)        util::err "unable to remove switch of unknown type" ;;
     esac
 
@@ -186,9 +202,10 @@ switch::add_member(){
     case "${_type}" in
         standard) switch::standard::add_member "${_switch}" "${_if}" ;;
         manual)   switch::manual::add_member "${_switch}" "${_if}" ;;
-        netgraph) switch::netgraph::add_member "${_switch}" "${_if}" ;;
-        vale)     switch::vale::add_member "${_switch}" "${_if}" ;;
         vxlan)    switch::vxlan::add_member "${_switch}" "${_if}" ;;
+        vale|netgraph)
+            util::err "switch type '${_type}' is not supported on Linux"
+            ;;
         *)        util::err "unable to configure switch of unknown type" ;;
     esac
 }
@@ -211,9 +228,10 @@ switch::remove_member(){
     case "${_type}" in
         standard) switch::standard::remove_member "${_switch}" "${_if}" ;;
         manual)   switch::manual::remove_member "${_switch}" "${_if}" ;;
-        netgraph) switch::netgraph::remove_member "${_switch}" "${_if}" ;;
-        vale)     switch::vale::remove_member "${_switch}" "${_if}" ;;
         vxlan)    switch::vxlan::remove_member "${_switch}" "${_if}" ;;
+        vale|netgraph)
+            util::err "switch type '${_type}' is not supported on Linux"
+            ;;
         *)        util::err "unable to configure switch of unknown type" ;;
     esac
 }
@@ -241,9 +259,10 @@ switch::vlan(){
     case "${_type}" in
         standard) switch::standard::vlan "${_switch}" "${_vlan}" ;;
         manual)   switch::manual::vlan "${_switch}" "${_vlan}" ;;
-        netgraph) switch::netgraph::vlan "${_switch}" "${_vlan}" ;;
-        vale)     switch::vale::vlan "${_switch}" "${_vlan}" ;;
         vxlan)    switch::vxlan::vlan "${_switch}" "${_vlan}" ;;
+        vale|netgraph)
+            util::err "switch type '${_type}' is not supported on Linux"
+            ;;
         *)        util::err "unable to configure switch of unknown type" ;;
     esac
 }
@@ -273,11 +292,8 @@ switch::private(){
                 config::core::set "private_${_switch}" "no"
             fi
             ;;
-        netgraph)
-            util::err "unable to configure private mode on netgraph switches"
-            ;;
-        vale)
-            util::err "unable to configure private mode on vale switches"
+        vale|netgraph)
+            util::err "switch type '${_type}' is not supported on Linux"
             ;;
         *)
             util::err "unable to configure switch of unknown type"
@@ -321,9 +337,10 @@ switch::address(){
     case "${_type}" in
         standard) switch::standard::address "${_switch}" "${_addr}" "${_delete}";;
         manual)   ;&
-        netgraph) ;&
-        vale)     ;&
         vxlan)    util::err "feature not currently supported on switches of this type" ;;
+        vale|netgraph)
+            util::err "switch type '${_type}' is not supported on Linux"
+            ;;
         *)        util::err "unable to configure switch of unknown type" ;;
     esac
 }
@@ -370,25 +387,31 @@ switch::id(){
     config::core::get "_type" "type_${_switch}"
 
     case "${_type}" in
-        vale)     switch::vale::id "${_var}" "${_switch}" ;;
-        netgraph) switch::netgraph::id "${_var}" "${_switch}" ;;
         manual)   switch::manual::id "${_var}" "${_switch}" ;;
+        vale|netgraph)
+            util::err "switch type '${_type}' is not supported on Linux"
+            ;;
         *)        switch::standard::id "${_var}" "${_switch}" ;;
     esac
 }
 
 # get a virt interface id for a port/switch
 #
+# Linux: FreeBSD hashes the switch name into a short group name because
+# ifconfig group names share the same length/character limits as
+# interface names. Linux's ifalias (sysfs) is a free-text field with no
+# such constraint, so we can just tag it with the switch name directly -
+# no hashing needed, and it's human-readable in `ip link show` output.
+#
 # @param string _var variable name to put result into
 # @param string _switch switch name to get id for
 #
 switch::__viid(){
-    local _hash=$(md5 -qs "${2}" | cut -c1-5)
-    setvar "$1" "viid-${_hash}@"
+    setvar "$1" "vm-switch/${2}"
 }
 
 # retrieve interface name, given a switch name
-# we convert to viid then look for the matching group
+# we convert to viid then look for the interface carrying that alias
 #
 # @param string _var variable to put interface name into
 # @param string _switch the switch name
@@ -396,16 +419,24 @@ switch::__viid(){
 switch::find(){
     local _var="$1"
     local _switch="$2"
-    local _viid _name
+    local _viid _f _alias
 
     switch::__viid "_viid" "${_switch}"
-    _name=$(ifconfig -g "${_viid}" 2>/dev/null)
-    [ -n "${_name}" ] && setvar "${_var}" "${_name}"
+
+    for _f in /sys/class/net/*/ifalias; do
+        [ -r "${_f}" ] || continue
+        _alias=$(cat "${_f}" 2>/dev/null)
+
+        if [ "${_alias}" = "${_viid}" ]; then
+            setvar "${_var}" "$(basename "$(dirname "${_f}")")"
+            return 0
+        fi
+    done
+
+    return 1
 }
 
 # mark an interface with a unique viid
-# i say unique, its 5 chars from an md5 hash which
-# should be enough for half a dozen switches
 #
 # @parem string _switch switch name
 # @param string _iface interface to mark
@@ -416,7 +447,7 @@ switch::set_viid(){
     local _viid
 
     switch::__viid "_viid" "${_switch}"
-    ifconfig "${_iface}" group "${_viid}" >/dev/null 2>&1
+    ip link set dev "${_iface}" alias "${_viid}" >/dev/null 2>&1
 }
 
 # create a network interface for a guest
@@ -436,11 +467,12 @@ switch::provision(){
     switch::type "_type" "${_switch}"
 
     case "${_type}" in
-        vale)     switch::vale::provision ;;
-        netgraph) switch::netgraph::provision ;;
         standard) ;&
         manual)   ;&
         vxlan)    switch::standard::provision ;;
+        vale|netgraph)
+            util::warn "switch type '${_type}' is not supported on Linux - interface ${_num} not configured"
+            ;;
         *)        util::warn "unable to configure interface ${_num}" ;;
     esac
 }

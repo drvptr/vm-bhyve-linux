@@ -22,7 +22,7 @@ tags::add(){
 
     datastore::get_guest "${_name}" || util::err "${_name} doesn't appear to be a valid virtual machine"
 
-    sysrc -inqf "${VM_DS_PATH}/${_name}/${_name}.conf" tags+="${_tags}" >/dev/null 2>&1
+    config::file_append "${VM_DS_PATH}/${_name}/${_name}.conf" "tags" "${_tags}"
 }
 
 # Remove tags from specified virtual machine
@@ -41,7 +41,7 @@ tags::remove(){
 
     datastore::get_guest "${_name}" || util::err "${_name} doesn't appear to be a valid virtual machine"
 
-    sysrc -inqf "${VM_DS_PATH}/${_name}/${_name}.conf" tags-="${_tags}" >/dev/null 2>&1
+    config::file_remove_value "${VM_DS_PATH}/${_name}/${_name}.conf" "tags" "${_tags}"
 }
 
 # List tags assigned to target
@@ -49,6 +49,7 @@ tags::remove(){
 #
 tags::list(){
     local _name
+    local _tags
 
     _name="$1"
 
@@ -56,9 +57,10 @@ tags::list(){
 
     datastore::get_guest "${_name}" || util::err "${_name} doesn't appear to be a valid virtual machine"
 
-    sysrc -inqf "${VM_DS_PATH}/${_name}/${_name}.conf" tags
-}
+    config::load_file_value "_tags" "${VM_DS_PATH}/${_name}/${_name}.conf" "tags"
 
+    echo "${_tags}"
+}
 
 # Shows a list of VMs that have specified tag
 # @param string tag
@@ -81,14 +83,13 @@ EOF
 
         while read _name; do
             [ ! -e "${VM_DS_PATH}/${_name}/${_name}.conf" ] && continue
-
-            sysrc -inqf "${VM_DS_PATH}/${_name}/${_name}.conf" tags | grep -q -w "${_tag}"
+            config::load_file_value "_tags" "${VM_DS_PATH}/${_name}/${_name}.conf" "tags"
+	    printf '%s\n' "${_tags}" | grep -q -w "${_tag}"
             if [ $? -eq 0 ]; then
                 _result="${_result} ${_name}"
             fi
         done <&9
     done
-
     echo $_result
 }
 

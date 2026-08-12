@@ -1,6 +1,69 @@
 #!/bin/sh
 # SPDX-License-Identifier: BSD-2-Clause
 # SPDX-FileCopyrightText: 2016 Matt Churchyard <churchers@gmail.com>
+# SPDX-FileCopyrightText: 2026 Petr Derbyshev <drvpotr@gmail.com>
+
+# read rx/tx byte counters for any network interface (physical, bridge,
+# or tap) straight from sysfs. Replaces netstat -biI parsing.
+#
+# @param string _var variable to store "rxbytes txbytes" into
+# @param string _if interface name
+# @return non-zero if the interface doesn't exist
+#
+info::__net_stats(){
+    local _var="$1"
+    local _if="$2"
+    local _rx _tx
+
+    [ -d "/sys/class/net/${_if}/statistics" ] || { config::setvar "${_var}" ""; return 1; }
+
+    _rx=$(cat "/sys/class/net/${_if}/statistics/rx_bytes" 2>/dev/null)
+    _tx=$(cat "/sys/class/net/${_if}/statistics/tx_bytes" 2>/dev/null)
+
+    [ -z "${_rx}" -o -z "${_tx}" ] && { config::setvar "${_var}" ""; return 1; }
+
+    config::setvar "${_var}" "${_rx} ${_tx}"
+}
+
+# find the tap device for one of a guest's network interfaces.
+#
+# Linux/QEMU: FreeBSD identifies a guest's tap via 'ifconfig descr
+# vmnet/<name>/<num>/<switch>'. Linux has no descr field, but sysfs
+# gives us the equivalent 'ifalias' (set with 'ip link set <tap> alias
+# ...'). This assumes vm-net tags every tap it creates the same way,
+# on creation, with alias "vmnet/<name>/<num>/<switch-or-custom>".
+#
+# @param string _var_id variable to store the tap device name in
+# @param string _var_tag variable to store the full alias string in
+# @param string _gname guest name
+# @param string _gnum interface number
+# @return non-zero if no matching tap is found
+#
+info::__find_tap(){
+    local _var_id="$1"
+    local _var_tag="$2"
+    local _gname="$3"
+    local _gnum="$4"
+    local _f _alias _if
+
+    for _f in /sys/class/net/*/ifalias; do
+        [ -r "${_f}" ] || continue
+        _alias=$(cat "${_f}" 2>/dev/null)
+
+        case "${_alias}" in
+            "vmnet/${_gname}/${_gnum}/"*)
+                _if=$(basename "$(dirname "${_f}")")
+                config::setvar "${_var_id}" "${_if}"
+                config::setvar "${_var_tag}" "${_alias}"
+                return 0
+                ;;
+        esac
+    done
+
+    config::setvar "${_var_id}" ""
+    config::setvar "${_var_tag}" ""
+    return 1
+}
 
 # 'vm info'
 # display a wealth of information about all guests, or one specified
@@ -9,7 +72,11 @@
 #
 info::guest(){
     local _name="$1"
-    local _bridge_list=$(ifconfig -g vm-switch)
+    # Linux: enumerate every bridge on the system rather than a FreeBSD
+    # interface "group" (Linux has no such concept). info::__find_bridge
+    # only uses this to check bridge *membership* of a specific tap, so
+    # a superset of bridges here is harmless.
+    local _bridge_list=$(ip -o link show type bridge | awk -F': ' '{print $2}')
     local _ds
 
     vm::running_load
@@ -101,9 +168,7 @@ info::switch_show(){
     info::__output_config "ports_${_switch}" "physical-ports"
 
     if [ -n "${_bridge}" ]; then
-        _stats=$(netstat -biI "${_bridge}" |grep '<Link#' | tail -n1 | awk '{ for (i=NF; i>1; i--) printf("%s ",$i); print $1; }' | awk '{print $5,$2}')
-
-        if [ -n "${_stats}" ]; then
+        if info::__net_stats "_stats" "${_bridge}"; then
             _b_in=$(info::__bytes_human "${_stats%% *}")
             _b_out=$(info::__bytes_human "${_stats##* }")
 
@@ -121,16 +186,27 @@ info::switch_show(){
 # get all guest ports for current bridge
 #
 info::switch_ports(){
-    local _port_list=$(ifconfig "${_bridge}" |grep 'member: tap' |awk '{print $2}')
-    local _port _guest
+    # Linux: bridge membership lives in sysfs - one entry per member
+    # interface under /sys/class/net/<bridge>/brif/. We only show
+    # ports that are actually tagged as guest taps (ifalias starting
+    # with "vmnet/"), same filtering intent as the FreeBSD "tap*" name
+    # match, just driven by the tag instead of the device name.
+    local _port_list=$(ls "/sys/class/net/${_bridge}/brif/" 2>/dev/null)
+    local _port _guest _alias
 
     for _port in ${_port_list}; do
-        _guest=$(ifconfig "${_port}" |grep 'description: vmnet' |awk '{print $2}' |cut -d'/' -f2)
+        _alias=$(cat "/sys/class/net/${_port}/ifalias" 2>/dev/null)
 
-        echo ""
-        echo "${_INDENT}virtual-port"
-        echo "${_INDENT}${_INDENT}device: ${_port}"
-        echo "${_INDENT}${_INDENT}vm: ${_guest:--}"
+        case "${_alias}" in
+            vmnet/*)
+                _guest=$(echo "${_alias}" | cut -d'/' -f2)
+
+                echo ""
+                echo "${_INDENT}virtual-port"
+                echo "${_INDENT}${_INDENT}device: ${_port}"
+                echo "${_INDENT}${_INDENT}vm: ${_guest:--}"
+                ;;
+        esac
     done
 }
 
@@ -150,9 +226,11 @@ info::guest_show(){
 
     config::load "${_conf}"
 
-    # check local and global runstate
-    [ -e "/dev/vmm/${_name}" ] && _RUN="1"
+    # check local and global runstate.
+    # Linux/QEMU: there's no /dev/vmm - vm::running_check already gives
+    # us the pid, so "running locally" just means that pid is alive.
     vm::running_check "_global_run" "_pid" "${_name}"
+    [ -n "${_pid}" ] && kill -0 "${_pid}" 2>/dev/null && _RUN="1"
     _global_run=$(echo "${_global_run}" | tr '[:upper:]' '[:lower:]')
 
     echo "------------------------"
@@ -183,9 +261,13 @@ info::guest_show(){
 
     # running system details
     if [ "${_RUN}" = "1" ]; then
-        _res_mem=$(bhyvectl --get-stats --vm="${_name}" |grep 'Resident memory' |awk '{print $3}')
+        # Linux/QEMU: resident memory comes straight from ps(1) instead
+        # of bhyvectl --get-stats. ps reports RSS in KB, convert to bytes
+        # to match info::__bytes_human's expected unit.
+        _res_mem=$(ps -o rss= -p "${_pid}" 2>/dev/null | tr -d ' ')
 
         if [ -n "${_res_mem}" ]; then
+            _res_mem=$((_res_mem * 1024))
             _b_res_mem=$(info::__bytes_human "${_res_mem}")
             echo "${_INDENT}memory-resident: ${_res_mem} (${_b_res_mem})"
         fi
@@ -243,6 +325,8 @@ info::guest_vtcon(){
 
 # display zfs snapshot/origin data
 #
+# zfs list/get are identical on Linux (OpenZFS) - nothing to change here.
+#
 info::guest_zfs(){
    local _INDENT="    "
    local _data
@@ -296,17 +380,27 @@ info::guest_disks(){
         if [ -n "${_path}" ]; then
             case "${_dev}" in
                 file)
-                    _size=$(stat -f%z "${_path}")
-                    _used=$(du "${_path}" | awk '{print $1}')
+                    # GNU stat uses -c, not BSD's -f
+                    _size=$(stat -c%s "${_path}")
+                    # force -k so the *1024 below is always KB -> bytes,
+                    # regardless of du's default block size
+                    _used=$(du -k "${_path}" | awk '{print $1}')
                     _used=$((_used * 1024))
                     ;;
                 zvol|sparse-zvol)
+                    # OpenZFS on Linux uses the same /dev/zvol/<dataset>
+                    # layout as FreeBSD, and the same zfs get syntax -
+                    # nothing to change here.
                     _size=$(zfs get -Hp volsize "${_path#/dev/zvol/}" |cut -f3)
                     _used=$(zfs get -Hp refer "${_path#/dev/zvol/}" |cut -f3)
                     ;;
                 iscsi)
-                    _size=$(sysctl -b kern.geom.conftxt | awk "/ ${_path#/dev/} /{print \$4}")
+                    # Linux: once a LUN is attached it's a normal block
+                    # device - ask the kernel for its size directly
+                    # instead of parsing FreeBSD's GEOM sysctl tree.
+                    _size=$(blockdev --getsize64 "${_path}" 2>/dev/null)
                     _used=${_size}
+                    ;;
             esac
 
             if [ -n "${_size}" -a -n "${_used}" ]; then
@@ -325,7 +419,7 @@ info::guest_disks(){
 #
 info::guest_networking(){
     local _num=0
-    local _int _id _tag _switch _stats _b_in _b_out
+    local _int _id _tag _switch _stats _b_in _b_out _mtu _bridge
     local _INDENT="    "
 
     while true; do
@@ -346,19 +440,18 @@ info::guest_networking(){
         if [ "${_RUN}" = "1" ]; then
             config::get "_switch" "network${_num}_switch"
 
-            _int=$(ifconfig | grep -B1 "vmnet/${_name}/${_num}/" | head -n1 | cut -d' ' -f1,6)
-            _id=${_int%%:*}
-            _tag=$(ifconfig | grep "vmnet/${_name}/${_num}/" | cut -d' ' -f2)
-
+            info::__find_tap "_id" "_tag" "${_name}" "${_num}"
             info::__find_bridge "_bridge" "${_id}"
+
+            _mtu=""
+            [ -n "${_id}" ] && _mtu=$(cat "/sys/class/net/${_id}/mtu" 2>/dev/null)
 
             echo "${_INDENT}active-device: ${_id:--}"
             echo "${_INDENT}desc: ${_tag:--}"
-            echo "${_INDENT}mtu: ${_int##* }"
+            echo "${_INDENT}mtu: ${_mtu:--}"
             echo "${_INDENT}bridge: ${_bridge:--}"
 
-            if [ -n "${_id}" ]; then
-                _stats=$(netstat -biI "${_id}" |grep '<Link#' |tail -n1 |awk '{ for (i=NF; i>1; i--) printf("%s ",$i); print $1; }' |awk '{print $2,$5}')
+            if [ -n "${_id}" ] && info::__net_stats "_stats" "${_id}"; then
                 _b_in=$(info::__bytes_human "${_stats%% *}")
                 _b_out=$(info::__bytes_human "${_stats##* }")
 
@@ -395,30 +488,35 @@ info::__output_config(){
 # this should be able to locate the bridge even for devices
 # that have been bridged manually and have no switch name configured
 #
+# Linux: bridge membership is a direct sysfs lookup - no text parsing
+# needed, just check whether the member file exists.
+#
 # @param string _var variable to put value into
 # @param string _interface interface to look for
 #
 info::__find_bridge(){
     local _var="$1"
     local _interface="$2"
-    local _br _found
+    local _br
+
+    [ -z "${_interface}" ] && { config::setvar "${_var}" ""; return 1; }
 
     for _br in ${_bridge_list}; do
-        _found=$(ifconfig "${_br}" |grep member: |awk '{print $2}' |tr "\n" "," | grep "${_interface},")
-
-        if [ -n "${_found}" ]; then
-            setvar "${_var}" "${_br}"
+        if [ -e "/sys/class/net/${_br}/brif/${_interface}" ]; then
+            config::setvar "${_var}" "${_br}"
             return 0
         fi
     done
 
-    setvar "${_var}" ""
+    config::setvar "${_var}" ""
     return 1
 }
 
 # format bytes to human readable
 # convert to k,m,g or t
 # output rounded number
+#
+# pure arithmetic (bc) - identical on Linux, nothing to change here.
 #
 # @param int _val the value to convert
 #
@@ -450,32 +548,40 @@ info::__bytes_human(){
     printf "%.${_dec}f%s" "${_val}" "${_ext}"
 }
 
+# Linux/open-iscsi: FreeBSD's iscsictl -L prints a fixed-width table
+# where a LUN's CAM device name sits at a predictable column. open-iscsi
+# has no equivalent single command - a logged-in target's LUNs are only
+# discoverable by walking sysfs under the matching iscsi_session. This
+# is a best-effort translation and hasn't been validated against a real
+# open-iscsi setup - please verify the sysfs path shape on your system
+# (it can vary a little with kernel/multipath configuration) before
+# relying on it.
+#
+# @param string _var variable to put the resolved /dev/sdX path into
+# @param string _target target in "iqn/lun" form (lun defaults to 0)
+#
 info::__find_iscsi() {
     local _var="$1"
-    # _target format: [iqn.*]unique_name[/N] where N is the lun# and defaults
-    # to 0. The address before the unique_name can be omitted so long as
-    # the unique_name is sufficient to select only one output of iscsictl -L.
     local _target="$2"
-    local _lun _col _found
+    local _lun _iqn _sess _dev
 
     # If no lun is specified, assume /0
     _lun=${_target##*/}
     [ "${_lun}" = "${_target}" ] && _lun=0
-    _target=${_target%/*}
+    _iqn=${_target%/*}
 
-    _found=$(iscsictl -L -w 10 | grep ${_target} | wc -l)
-    if [ "${_found}" -ne 1 ]; then
-        setvar "${_var}" ""
-        util::err "Unable to locate unique iSCSI device ${_target}"
-    fi
+    for _sess in /sys/class/iscsi_session/session*; do
+        [ -r "${_sess}/targetname" ] || continue
+        [ "$(cat "${_sess}/targetname" 2>/dev/null)" = "${_iqn}" ] || continue
 
-    # _col to be the column of iscsictl -L we want
-    _col=$((_lun + 4))
-    _found=$(iscsictl -L | awk "/${_target}/{print \$${_col}}")
-    if echo "${_found}" | egrep -q '^da[0-9]+$'; then
-        setvar "${_var}" /dev/"${_found}"
-        return 0
-    fi
+        _dev=$(find "${_sess}/device" -maxdepth 6 -path "*:${_lun}/block/*" -printf '%f\n' 2>/dev/null | head -n1)
 
-    util::err "Unable to locate iSCSI device ${_target}/${_lun}"
+        if [ -n "${_dev}" ]; then
+            config::setvar "${_var}" "/dev/${_dev}"
+            return 0
+        fi
+    done
+
+    config::setvar "${_var}" ""
+    util::err "Unable to locate iSCSI device ${_iqn}/${_lun}"
 }

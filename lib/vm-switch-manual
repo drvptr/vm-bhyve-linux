@@ -1,6 +1,7 @@
 #!/bin/sh
 # SPDX-License-Identifier: BSD-2-Clause
 # SPDX-FileCopyrightText: 2016 Matt Churchyard <churchers@gmail.com>
+# SPDX-FileCopyrightText: 2026 Petr Derbyshev <drvpotr@gmail.com>
 
 # for a manual switch the bridge interface should already exist
 # we just assign our description so it's visible in ifconfig
@@ -11,15 +12,14 @@ switch::manual::init(){
     local _name="$1"
     local _bridge="$2"
 
-    # get bridge
     if [ -z "${_bridge}" ]; then
         config::core::get "_bridge" "bridge_${_name}"
         [ -z "${_bridge}" ] && return 1
     fi
 
-    # don't rename custom bridges nor set a description.
-    # manual interfaces are fully configured using rc.conf.
-    ifconfig "${_bridge}" group vm-switch up >/dev/null 2>&1
+    # Linux: bring existing bridge up.
+    ip link set "${_bridge}" up >/dev/null 2>&1 || return 1
+
     switch::set_viid "${_name}" "${_bridge}"
 }
 
@@ -47,7 +47,7 @@ switch::manual::create(){
     [ -z "${_bridge}" ] && util::err "you must specify a bridge to import when creating a manual switch"
 
     # check we can find this bridge on the system
-    ifconfig "${_bridge}" >/dev/null 2>&1
+    ip link show "${_bridge}" >/dev/null 2>&1
     [ $? -eq 0 ] || util::err "${_bridge} does not appear to be a valid existing bridge"
 
     # store configuration
@@ -72,9 +72,9 @@ switch::manual::remove(){
     switch::manual::id "_id" "${_switch}"
     [ -z "${_id}" ] && return 0
 
-    # try to remove our description
-    # viid stays but it's not worth the extra hassle to remove that
-    ifconfig ${_id} -descr -group vm-switch >/dev/null 2>&1
+    # Manual bridge belongs to the user/system configuration.
+    # Do not delete or reconfigure it.
+    return 0
 }
 
 # add a new interface to this switch

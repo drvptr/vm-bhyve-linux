@@ -1,0 +1,10 @@
+[Unit]
+Description=Start and stop vm-bhyve-qemu guests
+Requires=vm-network.service
+After=vm-network.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/vm startall
+ExecStop=/usr/local/sbin/vm stopall -f

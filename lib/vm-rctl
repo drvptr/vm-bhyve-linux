@@ -2,6 +2,31 @@
 # SPDX-License-Identifier: BSD-2-Clause
 # SPDX-FileCopyrightText: 2016 ramdaron (https://github.com/ramdaron)
 # SPDX-FileCopyrightText: 2016 Matt Churchyard <churchers@gmail.com>
+# SPDX-FileCopyrightText: 2026 Petr Derbyshev <drvpotr@gmail.com>
+
+# Linux/QEMU: FreeBSD's rctl has no single equivalent here - the nearest
+# match is cgroup v2 (cpu + io controllers), which this file drives
+# directly through cgroupfs (no cgroup-tools/systemd dependency, in
+# keeping with this project's "minimal dependency" approach).
+#
+# Requires cgroup v2 (the unified hierarchy) mounted at /sys/fs/cgroup -
+# the default on any reasonably current systemd distro.
+#
+# CPU limiting maps over cleanly (pcpu % -> cpu.max quota/period).
+# I/O throttling is best-effort: cgroup v2's io.max is per block device
+# (major:minor), so we resolve the device backing the guest's datastore
+# and throttle there - unlike rctl, which throttles a process's I/O
+# regardless of device. This is also unreliable on ZFS-backed datastores:
+# ZFS does much of its own I/O scheduling/caching outside the normal
+# block-layer cgroup accounting path, so io.max may under-throttle (or
+# not apply at all to reads served from ARC). Test before relying on it.
+#
+# Note: cgroup directories created here aren't cleaned up when the guest
+# stops - they're harmless empty leftovers, but if that bothers you,
+# 'rmdir' them (they'll only succeed once empty) from wherever the guest
+# shutdown path lives in your core/run scripts.
+#
+VM_CGROOT="/sys/fs/cgroup/vm-bhyve"
 
 # set limits to virtual machine
 # this is the background process
@@ -9,6 +34,7 @@
 rctl::set(){
     local _pcpu _rbps _wbps _riops _wiops
     local _pid _pri
+    local _cg _devno _quota
 
     # get limit settings
     config::get "_pri" "priority"
@@ -18,46 +44,80 @@ rctl::set(){
     config::get "_riops" "limit_riops"
     config::get "_wiops" "limit_wiops"
 
-    # wait till bhyve starts and get pid
+    # wait till qemu starts and get pid
     sleep 1
-    _pid=$(pgrep -fx "bhyve[: ].* ${_name}")
+    _pid=$(vm::getpid "${_name}")
     [ -z "${_pid}" ] && return 1
 
     # check for a priority
-    [ -n "${_pri}" ] && renice ${_pri} ${_pid} >/dev/null 2>&1
+    [ -n "${_pri}" ] && renice "${_pri}" "${_pid}" >/dev/null 2>&1
 
     # return if there are no limits
     [ -z "${_pcpu}${_rbps}${_wbps}${_riops}${_wiops}" ] && return 1
 
-    # see if rctl works
-    /usr/bin/rctl >/dev/null 2>&1
-    [ $? -ne 0 ] && \
-        util::log "guest" "${_name}" "RCTL support requested but RCTL not available" && return 1
+    # see if cgroup v2 (unified hierarchy) is available
+    if [ ! -e /sys/fs/cgroup/cgroup.controllers ]; then
+        util::log "guest" "${_name}" "resource limits requested but cgroup v2 not available"
+        return 1
+    fi
 
-    util::log "guest" "${_name}" "applying rctl limits"
+    util::log "guest" "${_name}" "applying cgroup limits"
+
+    _cg="${VM_CGROOT}/${_name}"
+
+    # make sure the cpu/io controllers are enabled all the way down to
+    # our guest's cgroup - in cgroup v2 a child only gets a controller's
+    # interface files (cpu.max, io.max, ...) once every parent has opted
+    # it in via cgroup.subtree_control
+    mkdir -p "${VM_CGROOT}" 2>/dev/null
+    echo "+cpu +io" > /sys/fs/cgroup/cgroup.subtree_control 2>/dev/null
+    mkdir -p "${_cg}" 2>/dev/null
+    echo "+cpu +io" > "${VM_CGROOT}/cgroup.subtree_control" 2>/dev/null
+
+    if [ ! -d "${_cg}" ]; then
+        util::log "guest" "${_name}" "unable to create cgroup ${_cg}"
+        return 1
+    fi
+
+    # move the guest process into its own cgroup
+    echo "${_pid}" > "${_cg}/cgroup.procs" 2>/dev/null
 
     if [ -n "${_pcpu}" ]; then
-        /usr/bin/rctl -a process:${_pid}:pcpu:deny=${_pcpu} >/dev/null 2>&1
+        # rctl's pcpu is a percentage of one core; cpu.max wants
+        # "<quota> <period>" in microseconds - period defaults to
+        # 100000 (100ms), so quota = pcpu * 1000
+        _quota=$((_pcpu * 1000))
+        echo "${_quota} 100000" > "${_cg}/cpu.max" 2>/dev/null
         [ $? -eq 0 ] && util::log "guest" "${_name}" " pcpu=${_pcpu}"
     fi
 
-    if [ -n "${_rbps}" ]; then
-        /usr/bin/rctl -a process:${_pid}:readbps:throttle=${_rbps} >/dev/null 2>&1
-        [ $? -eq 0 ] && util::log "guest" " readbps=${_rbps}"
-    fi
+    if [ -n "${_rbps}${_wbps}${_riops}${_wiops}" ]; then
+        # resolve the block device backing this guest's datastore -
+        # io.max needs a major:minor pair, not a path
+        _devno=$(findmnt -no MAJ:MIN --target "${VM_DS_PATH}" 2>/dev/null)
 
-    if [ -n "${_wbps}" ]; then
-        /usr/bin/rctl -a process:${_pid}:writebps:throttle=${_wbps} >/dev/null 2>&1
-        [ $? -eq 0 ] && util::log "guest" " writebps=${_wbps}"
-    fi
+        if [ -z "${_devno}" ]; then
+            util::log "guest" "${_name}" "unable to resolve backing device for io limits"
+        else
+            if [ -n "${_rbps}" ]; then
+                echo "${_devno} rbps=${_rbps}" > "${_cg}/io.max" 2>/dev/null
+                [ $? -eq 0 ] && util::log "guest" "${_name}" " readbps=${_rbps}"
+            fi
 
-    if [ -n "${_riops}" ]; then
-        /usr/bin/rctl -a process:${_pid}:readiops:throttle=${_riops} >/dev/null 2>&1
-        [ $? -eq 0 ] && util::log "guest" " readiops=${_riops}"
-    fi
+            if [ -n "${_wbps}" ]; then
+                echo "${_devno} wbps=${_wbps}" > "${_cg}/io.max" 2>/dev/null
+                [ $? -eq 0 ] && util::log "guest" "${_name}" " writebps=${_wbps}"
+            fi
 
-    if [ -n "${_wiops}" ]; then
-        /usr/bin/rctl -a process:${_pid}:writeiops:throttle=${_wiops} >/dev/null 2>&1
-        [ $? -eq 0 ] && util::log "guest" " writeiops=${_wiops}"
+            if [ -n "${_riops}" ]; then
+                echo "${_devno} riops=${_riops}" > "${_cg}/io.max" 2>/dev/null
+                [ $? -eq 0 ] && util::log "guest" "${_name}" " readiops=${_riops}"
+            fi
+
+            if [ -n "${_wiops}" ]; then
+                echo "${_devno} wiops=${_wiops}" > "${_cg}/io.max" 2>/dev/null
+                [ $? -eq 0 ] && util::log "guest" "${_name}" " writeiops=${_wiops}"
+            fi
+        fi
     fi
 }

@@ -1,6 +1,50 @@
 #!/bin/sh
 # SPDX-License-Identifier: BSD-2-Clause
 # SPDX-FileCopyrightText: 2016 Matt Churchyard <churchers@gmail.com>
+# SPDX-FileCopyrightText: 2026 Petr Derbyshev <drvpotr@gmail.com>
+
+qemu::qmp(){
+    local _name="$1"
+    local _command="$2"
+    local _socket="${VM_DS_PATH}/${_name}/${_name}.qmp"
+
+    [ -S "${_socket}" ] || \
+        util::err "QMP socket not found for ${_name}"
+
+    printf '%s\n' "${_command}" | \
+        socat - UNIX-CONNECT:"${_socket}"
+}
+
+vm::getpid(){
+
+    local _name="$1"
+    local _pidfile="${VM_DS_PATH}/${_name}/${_name}.pid"
+
+    [ -r "${_pidfile}" ] || return 1
+
+    cat "${_pidfile}"
+}
+
+# poll until a pid disappears, or a timeout (in seconds) elapses
+#
+# @private
+# @param int _pid pid to watch
+# @param int _timeout seconds to wait before giving up (default 90)
+# @return 0 if the process exited, 1 if it is still running after the timeout
+#
+qemu::wait_exit(){
+    local _pid="$1"
+    local _timeout="${2:-90}"
+    local _waited=0
+
+    while kill -0 "${_pid}" 2>/dev/null; do
+        [ "${_waited}" -ge "${_timeout}" ] && return 1
+        sleep 1
+        _waited=$((_waited + 1))
+    done
+
+    return 0
+}
 
 # 'vm list'
 # list virtual machines
@@ -246,7 +290,8 @@ core::create(){
         esac
 
         # scrap size option from guest template
-        sysrc -inxqf "${VM_DS_PATH}/${_name}/${_name}.conf" "disk${_num}_size"
+        # disk size has already been consumed when the disk was created
+        config::unset "${_name}" "disk${_num}_size"
 
         # look for another disk
         _num=$((_num + 1))
@@ -627,81 +672,107 @@ core::startall(){
 # stop all bhyve instances
 # note this will also stop instances not started by vm-bhyve
 #
+# 'vm stopall'
+#
+# stop all running virtual machines
+#
 core::stopall(){
-    local _pids=$(pgrep -f 'bhyve:' | tr '\n' ' ')
-    local _stop_parallel _stop_list _running _list_rev _curr
-    local _stop_p_pids _pid
+    local _running
+    local _stop_parallel
+    local _stop_list
+    local _list_rev
+    local _curr
+    local _done
 
     cmd::parse_args "$@"
     : ${vm_delay:=2}
 
-    # get a list of running bhyve instances
-    _running=$(pgrep -lf 'bhyve:' | cut -d" " -f3 | tr '\n' ' ')
+    #
+    # Get all running VM names.
+    #
+    # Linux/QEMU: qemu-system-* processes carry "-name <vm-name>" on
+    # their command line, so the guest name can be recovered straight
+    # from ps(1). This also catches instances not started by this
+    # tool, mirroring the original bhyve behaviour.
+    #
+    _running=$(
+        ps -eo args= |
+        sed -n 's/.*-name[[:space:]]\+\([^,[:space:]]*\).*/\1/p' |
+        sort -u |
+        tr '\n' ' '
+    )
+
     [ -z "${_running}" ] && return 0
 
-    # do we have any guests to stop in order
+    #
+    # If we have an autostart list and this isn't a forced shutdown,
+    # stop VMs in reverse startup order.
+    #
     if [ -z "${VM_OPT_FORCE}" -a -n "${vm_list}" ]; then
-        # reverse the configured start order
+
+        #
+        # Reverse vm_list.
+        #
         for _curr in ${vm_list}; do
             _list_rev="${_curr} ${_list_rev}"
         done
 
-        # go through each autostart guest
-        # if running add to stop list.
-        # we are searching in reverse start order, so should get an ordered shutdown
+        #
+        # Add running autostart VMs to ordered stop list.
+        #
         for _curr in ${_list_rev}; do
-            echo "${_running}" | grep -qs "${_curr} "
-
-            if [ $? -eq 0 ]; then
+            echo "${_running}" | grep -F -qw "${_curr}" && \
                 _stop_list="${_stop_list}${_stop_list:+ }${_curr}"
-            fi
         done
 
-        # look for anything running that isn't in the ordered stop list
+        #
+        # Find running VMs which aren't in the ordered list.
+        # These can be stopped in parallel.
+        #
         for _curr in ${_running}; do
-            echo "${_stop_list}" | grep -qs "${_curr}\b"
-            if [ $? -ne 0 ]; then
+            echo "${_stop_list}" | grep -F -qw "${_curr}" || \
                 _stop_parallel="${_stop_parallel}${_stop_parallel:+ }${_curr}"
-                util::getpid "_pid" "bhyve: ${_curr}\$"
-                [ $? -eq 0 ] && _stop_p_pids="${_stop_p_pids}${_stop_p_pids:+ }${_pid}"
-            fi
         done
+
     else
-        # nothing ordered, or a force shutdown
-        # just do everything at once
+        #
+        # No ordered shutdown or force mode:
+        # stop everything in parallel.
+        #
         _stop_parallel="${_running}"
-        _stop_p_pids="${_pids}"
     fi
 
     echo "Beginning shutdown process"
 
-    # have any guests to stop in parallel
-    if [ -n "${_stop_p_pids}" ]; then
+    #
+    # Stop unordered VMs in parallel - each one gets its own graceful
+    # ACPI powerdown (with SIGTERM/SIGKILL escalation) via
+    # core::__stop_one, running in the background.
+    #
+    if [ -n "${_stop_parallel}" ]; then
         echo "  * parallel shutdown of non-ordered guests: ${_stop_parallel}"
-        kill ${_stop_p_pids} >/dev/null 2>&1
-        sleep 1
-        kill ${_stop_p_pids} >/dev/null 2>&1
+
+        for _curr in ${_stop_parallel}; do
+            core::__stop_one "${_curr}" &
+        done
+
+        wait
     fi
 
+    #
+    # Stop ordered VMs one by one.
+    #
     if [ -n "${_stop_list}" ]; then
-        _pid=""
         for _curr in ${_stop_list}; do
-            [ -n "${_pid}" ] && echo "  * waiting ${vm_delay} second(s)" && sleep ${vm_delay}
-            util::getpid "_pid" "bhyve: ${_curr}\$"
-
-            if [ $? -eq 0 ]; then
-                echo "  * stopping ${_curr}"
-                kill ${_pid} >/dev/null 2>&1
-                sleep 1
-                kill ${_pid} >/dev/null 2>&1
-            fi
+            [ -n "${_done}" ] && echo "  * waiting ${vm_delay} second(s)" && sleep "${vm_delay}"
+            echo "  * stopping ${_curr}"
+            core::__stop_one "${_curr}"
+            _done="1"
         done
     fi
 
     echo ""
-    wait_for_pids ${_pids}
 }
-
 # 'vm suspendall'
 #
 # suspend all bhyve instances
@@ -712,17 +783,29 @@ core::stopall(){
 #
 core::suspendall()
 {
-    local _pids=$(pgrep -f 'bhyve:' | tr '\n' ' ')
     local _stop_parallel _stop_list _running _list_rev _curr
-    local _stop_p_pids _pid
-
-    util::check_bhyve_suspend || util::err "unable to suspend the guest"
+    local _ds _n _p
 
     cmd::parse_args "$@"
     : ${vm_delay:=2}
 
-    # get a list of running bhyve instances
-    _running=$(pgrep -lf 'bhyve:' | cut -d" " -f3 | tr '\n' ' ')
+    #
+    # Linux/QEMU: unlike stopall, we can only suspend guests we started
+    # ourselves - that's the only way we know the pid to talk to over
+    # QMP and where to write the .save state. So "running" here means
+    # "has a live pid file", checked across every guest in every
+    # datastore.
+    #
+    _running=$(
+        for _ds in ${VM_DATASTORE_LIST}; do
+            datastore::get "${_ds}" || continue
+            ls -1 "${VM_DS_PATH}" 2>/dev/null
+        done | sort -u | while read -r _n; do
+            _p=$(vm::getpid "${_n}")
+            [ -n "${_p}" ] && kill -0 "${_p}" 2>/dev/null && echo "${_n}"
+        done | tr '\n' ' '
+    )
+
     [ -z "${_running}" ] && return 0
 
     # do we have any guests to stop in order
@@ -736,30 +819,20 @@ core::suspendall()
         # if running add to stop list.
         # we are searching in reverse start order, so should get an ordered shutdown
         for _curr in ${_list_rev}; do
-            echo "${_running}" | grep -qs "${_curr} "
-
-            if [ $? -eq 0 ]; then
+            echo "${_running}" | grep -F -qw "${_curr}" && \
                 _stop_list="${_stop_list}${_stop_list:+ }${_curr}"
-            fi
         done
 
         # look for anything running that isn't in the ordered stop list
         for _curr in ${_running}; do
-            echo "${_stop_list}" | grep -qs "${_curr}\b"
-            if [ $? -ne 0 ]; then
+            echo "${_stop_list}" | grep -F -qw "${_curr}" || \
                 _stop_parallel="${_stop_parallel}${_stop_parallel:+ }${_curr}"
-                util::getpid "_pid" "bhyve: ${_curr}\$"
-                [ $? -eq 0 ] && _stop_p_pids="${_stop_p_pids}${_stop_p_pids:+ }${_pid}"
-            fi
         done
     else
         # nothing ordered, or a force suspend
         # just do everything at once
         _stop_parallel="${_running}"
-        _stop_p_pids="${_pids}"
     fi
-
-    # ===== same as core::stopall() up to this line ===
 
     echo "Beginning shutdown process (suspend)"
 
@@ -782,7 +855,6 @@ core::suspendall()
     fi
 
     echo ""
-    wait_for_pids ${_pids}
 }
 
 # 'vm start'
@@ -867,24 +939,8 @@ core::__start(){
         return 1
     fi
 
-    # we can only load freebsd without unrestricted guest support
-    if [ -n "${VM_NO_UG}" -a "${_loader}" != "bhyveload" ]; then
-        echo "  ! no unrestricted guest support in cpu. only single vcpu FreeBSD guests supported"
-        return 1
-    fi
-
-    # check loader
-    if [ "${_loader}" = "grub" ]; then
-        _util=$(which grub-bhyve)
-
-        if [ -z "${_util}" ]; then
-            echo "  ! grub requested but sysutils/grub2-bhyve not installed?"
-            return 1
-        fi
-    fi
-
     # check for tmux
-    config::core::get "_console" "console" "nmdm"
+    config::core::get "_console" "console" "stdio"
     _tmux_cmd=$(which tmux)
 
     if [ "${_console}" = "tmux" -a -z "${_tmux_cmd}" ]; then
@@ -946,75 +1002,70 @@ core::restart(){
 #
 core::stop(){
     local _name="$1"
-    local _pid _loadpid
-
     [ -z "${_name}" ] && help::show "stop"
 
     while [ -n "${_name}" ]; do
-        if [ ! -e "/dev/vmm/${_name}" ]; then
-            util::warn "${_name} doesn't appear to be a running virtual machine"
-        else
-            _pid=$(pgrep -fx "bhyve: ${_name}")
-            _loadpid=$(pgrep -fl "grub-bhyve|bhyveload" | grep " ${_name}\$" |cut -d' ' -f1)
-
-            if [ -n "${_pid}" ]; then
-                echo "Sending ACPI shutdown to ${_name}"
-                kill "${_pid}" >/dev/null 2>&1
-                sleep 1
-                kill "${_pid}" >/dev/null 2>&1
-                # remove saved vm state after normal shutdown
-                core::discard -f "${_name}"
-            elif [ -n "${_loadpid}" ]; then
-                if util::confirm "Guest ${_name} is in bootloader stage, do you wish to force exit"; then
-                    echo "Killing ${_name}"
-                    kill "${_loadpid}"
-                    bhyvectl --destroy --vm=${_name} >/dev/null 2>&1
-                fi
-            else
-                util::warn "unable to locate process id for ${_name}"
-            fi
-        fi
+        core::__stop_one "${_name}"
         shift
         _name="$1"
     done
+}
+
+# gracefully stop a single guest: ACPI powerdown via QMP (equivalent to
+# bhyve's SIGTERM-triggered ACPI shutdown), wait for it to exit on its
+# own, and only escalate to SIGTERM/SIGKILL if it doesn't within
+# ${vm_stop_timeout} seconds. Used by both 'vm stop' and 'vm stopall'.
+#
+# @private
+# @param string _name name of the guest to stop
+#
+core::__stop_one(){
+    local _name="$1"
+    local _pid
+
+    _pid=$(vm::getpid "${_name}")
+
+    if [ -z "${_pid}" ] || ! kill -0 "${_pid}" 2>/dev/null; then
+        util::warn "${_name} doesn't appear to be a running virtual machine"
+        return 1
+    fi
+
+    : ${vm_stop_timeout:=90}
+
+    echo "Sending ACPI shutdown to ${_name}"
+
+    if [ -S "${VM_DS_PATH}/${_name}/${_name}.qmp" ]; then
+        qemu::qmp "${_name}" '{"execute":"system_powerdown"}' >/dev/null 2>&1
+    else
+        # no QMP socket available - fall back to a plain SIGTERM
+        kill -TERM "${_pid}" >/dev/null 2>&1
+    fi
+
+    # give the guest OS a chance to shut down cleanly on its own
+    if ! qemu::wait_exit "${_pid}" "${vm_stop_timeout}"; then
+        util::warn "${_name} did not shut down within ${vm_stop_timeout}s, forcing stop"
+        kill -TERM "${_pid}" >/dev/null 2>&1
+        qemu::wait_exit "${_pid}" 5 || kill -KILL "${_pid}" >/dev/null 2>&1
+    fi
+
+    # remove saved vm state after normal shutdown
+    core::discard -f "${_name}" >/dev/null 2>&1
 }
 
 core::suspend(){
     local _name="$1"
-    local _pid _loadpid
-
-    util::check_bhyve_suspend || util::err "unable to suspend the guest"
-
     [ -z "${_name}" ] && help::show "suspend"
-
-    datastore::get_guest "${_name}" || util::err "${_name} doesn't appear to be a valid virtual machine"
-
-    while [ -n "${_name}" ]; do
-        if [ ! -e "/dev/vmm/${_name}" ]; then
-            util::warn "${_name} doesn't appear to be a running virtual machine"
-        else
-            _pid=$(pgrep -fx "bhyve: ${_name}")
-            _loadpid=$(pgrep -fl "grub-bhyve|bhyveload" | grep " ${_name}\$" |cut -d' ' -f1)
-
-            if [ -n "${_pid}" ]; then
-                echo "Suspending ${_name}"
-                # TODO: convert to function
-                hostname > "${VM_DS_PATH}/${_name}/suspending.lock"
-                bhyvectl --vm=${_name} --suspend="${VM_DS_PATH}/${_name}/${_name}.save" >/dev/null 2>&1
-            elif [ -n "${_loadpind}" ]; then
-                if util::confirm "Guest ${_name} is in bootloader stage and cannot suspend, do you wish to force exit"; then
-                    echo "Killing ${_name}"
-                    kill "${_loadpid}"
-                    bhyvectl --destroy --vm=${_name} >/dev/null 2>&1
-                fi
-            else
-                util::warn "unable to locate process id for ${_name}"
-            fi
-        fi
-        shift
-        _name="$1"
-    done
+    datastore::get_guest "${_name}" || \
+        util::err "${_name} doesn't appear to be a valid virtual machine"
+    vm::confirm_running "${_name}" || \
+        util::err "${_name} doesn't appear to be a running virtual machine"
+    echo "Suspending ${_name}"
+    hostname > "${VM_DS_PATH}/${_name}/suspending.lock"
+    qemu::qmp "${_name}" \
+        "{\"execute\":\"migrate\",\"arguments\":{\"uri\":\"file:${VM_DS_PATH}/${_name}/${_name}.save\"}}"
 }
+
+
 
 # 'vm reset'
 # force reset
@@ -1023,19 +1074,17 @@ core::suspend(){
 #
 core::reset(){
     local _name
-
     cmd::parse_args "$@"
     shift $?
     _name="$1"
-
     [ -z "${_name}" ] && help::show "reset"
-    [ ! -e "/dev/vmm/${_name}" ] && util::err "${_name} doesn't appear to be a running virtual machine"
+    vm::confirm_running "${_name}" || \
+        util::err "${_name} doesn't appear to be a running virtual machine"
 
     if [ -z "${VM_OPT_FORCE}" ]; then
         util::confirm "Are you sure you want to forcefully reset this virtual machine" || exit 0
     fi
-
-    bhyvectl --force-reset --vm=${_name}
+    qemu::qmp "${_name}" '{"execute":"system_reset"}'
 }
 
 # 'vm poweroff'
@@ -1045,20 +1094,18 @@ core::reset(){
 #
 core::poweroff(){
     local _name
-
     cmd::parse_args "$@"
     shift $?
     _name="$1"
-
     [ -z "${_name}" ] && help::show "poweroff"
-    [ ! -e "/dev/vmm/${_name}" ] && util::err "${_name} doesn't appear to be a running virtual machine"
-
+    vm::confirm_running "${_name}" || \
+        util::err "${_name} doesn't appear to be a running virtual machine"
     if [ -z "${VM_OPT_FORCE}" ]; then
         util::confirm "Are you sure you want to forcefully poweroff this virtual machine" || exit 0
     fi
-
+    qemu::qmp "${_name}" '{"execute":"quit"}'
     # remove saved vm state on forceful poweroff
-    bhyvectl --force-poweroff --vm=${_name} && bhyvectl --destroy --vm=${_name} && core::discard -f "${_name}"
+    core::discard -f "${_name}"
 }
 
 # 'vm destroy'
@@ -1192,7 +1239,7 @@ core::rename(){
 #
 core::console(){
     local _name _port
-    local _console _tmux _tmux_cmd _wait_for_vm
+    local _console _tmux _tmux_cmd _wait_for_vm _pid
 
     while getopts w _opt ; do
         case $_opt in
@@ -1212,13 +1259,18 @@ core::console(){
 
     if [ -n "${_wait_for_vm}" ]; then
         echo "Waiting for ${_name} to start..."
-        # wait for the VM to start; /dev/vmm/${_name} usually appears within 50 ms
+        # wait for the pid file to appear and the process to be alive
         sleep 0.05
-        while [ ! -e "/dev/vmm/${_name}" ]; do
+        while true; do
+            _pid=$(vm::getpid "${_name}")
+            [ -n "${_pid}" ] && kill -0 "${_pid}" 2>/dev/null && break
             sleep 1
         done
     else
-        [ ! -e "/dev/vmm/${_name}" ] && util::err "${_name} doesn't appear to be a running virtual machine"
+        _pid=$(vm::getpid "${_name}")
+        if [ -z "${_pid}" ] || ! kill -0 "${_pid}" 2>/dev/null; then
+            util::err "${_name} doesn't appear to be a running virtual machine"
+        fi
     fi
 
     if [ -e "${VM_DS_PATH}/${_name}/console" ]; then
@@ -1247,7 +1299,7 @@ core::console(){
     fi
 
     [ -z "${_console}" ] && util::err "unable to locate console device for this virtual machine"
-    cu -l "${_console}"
+    socat -,raw,echo=0 UNIX-CONNECT:"${_console}"
 }
 
 # 'vm configure'
@@ -1307,11 +1359,23 @@ core::iso(){
 
     if [ -n "${_url}" ]; then
         datastore::get_iso "${_ds}" || util::err "unable to locate path for datastore '${_ds}'"
-        # Essentially, -4 and -6 are mutually exclusive, but fetch(1) does not enforce it.
-        # The last one wins, so leaving it to fetch(1).
-        fetch ${_fetch_opts} -o "${VM_DS_PATH}" "${_url}"
-        _filename=$(basename "${_url}")
-        core::decompress "${VM_DS_PATH}/${_filename}"
+        # converted from Fetch to Curl
+	_filename=$(basename "${_url}")
+	case "${_fetch_opts}" in
+	    *"-4"*)
+        	_curl_opts="-4"
+        	;;
+	    *"-6"*)
+        	_curl_opts="-6"
+        	;;
+	    *)
+        	_curl_opts=""
+        	;;
+	esac
+	curl -L ${_curl_opts} -o "${VM_DS_PATH}/${_filename}" "${_url}" || \
+	    util::err "failed to download ISO image"
+
+	core::decompress "${VM_DS_PATH}/${_filename}"
     else
         datastore::iso_list
     fi
@@ -1366,10 +1430,21 @@ core::img(){
     if [ -n "${_url}" ]; then
         datastore::get_img "${_ds}" || util::err "unable to locate path for datastore '${_ds}'"
         _filename=$(basename "${_url}")
-        # Essentially, -4 and -6 are mutually exclusive, but fetch(1) does not enforce it.
-        # The last one wins, so leaving it to fetch(1).
-        fetch ${_fetch_opts} -o "${VM_DS_PATH}" "${_url}"
-        core::decompress "${VM_DS_PATH}/${_filename}"
+        # converted from Fetch to Curl
+	case "${_fetch_opts}" in
+	    *"-4"*)
+        	_curl_opts="-4"
+        	;;
+	    *"-6"*)
+        	_curl_opts="-6"
+        	;;
+	    *)
+        	_curl_opts=""
+        	;;
+	esac
+	curl -L ${_curl_opts} -o "${VM_DS_PATH}/${_filename}" "${_url}" || \
+	    util::err "failed to download cloud image"
+	core::decompress "${VM_DS_PATH}/${_filename}"
     else
         datastore::img_list
     fi
@@ -1381,18 +1456,26 @@ core::img(){
 #
 core::passthru(){
     local _dev _sbf _desc _ready
-    local _format="%-10s %-12s %-12s %s\n"
+    local _format="%-12s %-12s %-8s %s\n"
+    printf "${_format}" "DEVICE" "PCI ID" "READY" "DESCRIPTION"
+    lspci -D | while read -r _sbf _desc; do
+        _dev="${_sbf}"
+        _ready="No"
+        if [ -e "/sys/bus/pci/devices/${_dev}/driver" ]; then
+            _driver=$(basename "$(readlink \
+                "/sys/bus/pci/devices/${_dev}/driver" 2>/dev/null)")
+        else
+            _driver=""
+        fi
 
-    printf "${_format}" "DEVICE" "BHYVE ID" "READY" "DESCRIPTION"
-
-    pciconf -l | awk -F'[@:]' '{ print $1,$3 "/" $4 "/" $5}' | \
-    while read _dev _sbf; do
-
-        _ready=$(echo "${_dev}" | grep ^ppt)
-        [ -n "${_ready}" ] && _ready="Yes"
-
-        _desc=$(pciconf -lv | grep -A2 "^${_dev}@" | tail -n1 | grep device | cut -d\' -f2)
-        printf "${_format}" "${_dev}" "${_sbf}" "${_ready:-No}" "${_desc:--}"
+        if [ "${_driver}" = "vfio-pci" ]; then
+            _ready="Yes"
+        fi
+        printf "${_format}" \
+            "${_dev}" \
+            "${_sbf}" \
+            "${_ready}" \
+            "${_desc:--}"
     done
 }
 

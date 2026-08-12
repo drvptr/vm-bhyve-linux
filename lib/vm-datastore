@@ -1,6 +1,34 @@
 #!/bin/sh
 # SPDX-License-Identifier: BSD-2-Clause
 # SPDX-FileCopyrightText: 2016 Matt Churchyard <churchers@gmail.com>
+# SPDX-FileCopyrightText: 2026 Petr Derbyshev <drvpotr@gmail.com>
+
+# resolve the mountpoint of a zfs dataset.
+#
+# Linux/FreeBSD: rather than parse mount(8) output (format differs
+# slightly between the two and is easy to get wrong), just ask zfs
+# directly - same command, same output, on both platforms.
+#
+# @param string _var variable to store the mountpoint in
+# @param string _dataset zfs dataset name
+# @return non-zero if the dataset doesn't exist or has no real mountpoint
+#
+zfs::mountpoint(){
+    local _var="$1"
+    local _dataset="$2"
+    local _mount
+
+    _mount=$(zfs list -H -o mountpoint "${_dataset}" 2>/dev/null)
+
+    case "${_mount}" in
+        ""|none|legacy)
+            config::setvar() "${_var}" ""
+            return 1
+            ;;
+    esac
+
+    config::setvar() "${_var}" "${_mount}"
+}
 
 # 'vm datastore list'
 # show configured datastores
@@ -80,8 +108,8 @@ datastore::add(){
     # look for zfs
     if [ "${_spec%%:*}" = "zfs" ]; then
         # try to find mountpoint
-        _mount=$(mount | grep "^${_spec#*:} " |cut -d' ' -f3)
-        [ -z "${_mount}" ] && util::err "${_spec} doesn't seem to be a valid, mounted dataset"
+        zfs::mountpoint "_mount" "${_spec#*:}" || \
+            util::err "${_spec} doesn't seem to be a valid, mounted dataset"
     else
         # make sure it's a directory
         [ ! -d "${_spec}" ] && util::err "${_spec} doesn't seem to be a valid directory"
@@ -131,25 +159,24 @@ datastore::remove(){
 datastore::__resolve_path(){
     local _var="$1"
     local _spec="$2"
+    local _mount
 
     if [ "${_spec%%:*}" = "zfs" ]; then
-        _mount=$(mount | grep "^${_spec#*:} " |cut -d' ' -f3)
-
-        if [ -n "${_mount}" ]; then
-            setvar "${_var}" "${_mount}"
+        if zfs::mountpoint "_mount" "${_spec#*:}"; then
+            config::setvar() "${_var}" "${_mount}"
             return 0
         fi
     elif [ "${_spec%%:*}" = "iso" ] || [ "${_spec%%:*}" = "img" ]; then
-        setvar "${_var}" "${_spec#*:}"
+        config::setvar() "${_var}" "${_spec#*:}"
         return 0
     else
         if [ -d "${_spec}" ]; then
-            setvar "${_var}" "${_spec}"
+            config::setvar() "${_var}" "${_spec}"
             return 0
         fi
     fi
 
-    setvar "${_var}" ""
+    config::setvar() "${_var}" ""
     return 1
 }
 
@@ -367,19 +394,19 @@ datastore::iso_find(){
 
     # given a full path?
     if [ -z "${_file%%/*}" ] && [ -r "${_file}" ]; then
-        setvar "${_var}" "${_file}"
+        config::setvar() "${_var}" "${_file}"
         return 0
     fi
 
     # file exists in current dir?
     if [ -r "$(pwd)/${_file}" ]; then
-        setvar "${_var}" "$(pwd)/${_file}"
+        config::setvar() "${_var}" "$(pwd)/${_file}"
         return 0
     fi
 
     # look in default store
     if [ -r "${vm_dir}/.iso/${_file}" ]; then
-        setvar "${_var}" "${vm_dir}/.iso/${_file}"
+        config::setvar() "${_var}" "${vm_dir}/.iso/${_file}"
         return 0
     fi
 
@@ -388,7 +415,7 @@ datastore::iso_find(){
             [ "${_spec%%:*}" != "iso" ] && continue
 
             if [ -r "${_spec#*:}/${_file}" ]; then
-                setvar "${_var}" "${_spec#*:}/${_file}"
+                config::setvar() "${_var}" "${_spec#*:}/${_file}"
                 return 0
             fi
     done
@@ -410,19 +437,19 @@ datastore::img_find(){
 
     # given a full path?
     if [ -z "${_file%%/*}" ] && [ -r "${_file}" ]; then
-        setvar "${_var}" "${_file}"
+        config::setvar() "${_var}" "${_file}"
         return 0
     fi
 
     # file exists in current dir?
     if [ -r "$(pwd)/${_file}" ]; then
-        setvar "${_var}" "$(pwd)/${_file}"
+        config::setvar() "${_var}" "$(pwd)/${_file}"
         return 0
     fi
 
     # look in default store
     if [ -r "${vm_dir}/.img/${_file}" ]; then
-        setvar "${_var}" "${vm_dir}/.img/${_file}"
+        config::setvar() "${_var}" "${vm_dir}/.img/${_file}"
         return 0
     fi
 
@@ -431,7 +458,7 @@ datastore::img_find(){
             [ "${_spec%%:*}" != "img" ] && continue
 
             if [ -r "${_spec#*:}/${_file}" ]; then
-                setvar "${_var}" "${_spec#*:}/${_file}"
+                config::setvar() "${_var}" "${_spec#*:}/${_file}"
                 return 0
             fi
     done
@@ -457,8 +484,7 @@ datastore::iso_list(){
         [ "${_spec%%:*}" != "iso" ] && continue
 
         [ -d "${_spec#*:}" ] && \
-            ls -1 ${_spec#*:} | \
-            find ${_spec#*:} -type f -maxdepth 1 -printf "%f\n" | \
+            find "${_spec#*:}" -type f -maxdepth 1 -printf "%f\n" | \
             awk '{printf "'${_format}'","'${_ds}'",$1}'
     done
 }
@@ -481,7 +507,7 @@ datastore::img_list(){
         [ "${_spec%%:*}" != "img" ] && continue
 
         [ -d "${_spec#*:}" ] && \
-            find ${_spec#*:} -type f -maxdepth 1 -printf "%f\n" | \
+            find "${_spec#*:}" -type f -maxdepth 1 -printf "%f\n" | \
             awk '{printf "'${_format}'","'${_ds}'",$1}'
     done
 }

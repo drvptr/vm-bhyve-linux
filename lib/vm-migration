@@ -1,6 +1,7 @@
 #!/bin/sh
 # SPDX-License-Identifier: BSD-2-Clause
 # SPDX-FileCopyrightText: 2021 Matt Churchyard <churchers@gmail.com>
+# SPDX-FileCopyrightText: 2026 Petr Derbyshev <drvpotr@gmail.com>
 
 # vm migrate ...
 #
@@ -44,8 +45,8 @@ migration::run(){
 
     # basic checks
     [ -z "${_name}" -o -z "${_host}" ] && util::usage
-    datastore::get_guest "${_name}" || util:err "unable to locate guest - '${_name}'"
-    [ -z "${VM_DS_ZFS}" ] && util:err "the source datastore must be ZFS to support migration"
+    datastore::get_guest "${_name}" || util::err "unable to locate guest - '${_name}'"
+    [ -z "${VM_DS_ZFS}" ] && util::err "the source datastore must be ZFS to support migration"
     [ -n "${_stage}" -a -n "${_triple}" ] && util::err "single stage and triple stage are mutually exclusive"
     [ "${_stage}" = "2" -a -z "${_inc}" ] && util::err "source snapshot must be given when running stage 2"
 
@@ -68,7 +69,7 @@ migration::run(){
 
     # try to get pid
     if [ -n "${_running}" ]; then
-        _pid=$(pgrep -fx "bhyve: ${_name}")
+        _pid=$(vm::getpid "${_name}")
         [ -z "${_pid}" ] && util::err "guest seems to be running but can't find its pid"
     fi
 
@@ -112,24 +113,20 @@ migration::run(){
         exit
     fi
 
-    # if it's running we now need to stop it
+    # if it's running we now need to stop it.
+    # Linux/QEMU: reuse core::stop rather than a raw kill+poll loop here -
+    # it already does a graceful QMP ACPI shutdown with a sane timeout
+    # before escalating, which is what we actually want mid-migration
+    # too (a hard kill risks an unclean guest filesystem on the disk
+    # we're about to send).
     if [ -n "${_running}" ]; then
-        echo -n "  * stage 2: attempting to stop guest"
-
-        kill ${_pid} >/dev/null 2>&1
-
-        while [ ${_count} -lt 60 ]; do
-            sleep 2
-            kill -0 ${_pid} >/dev/null 2>&1 || break
-            echo -n "."
-            _count=$((_count + 1))
-        done
-
-        echo ""
+        echo "  * stage 2: stopping guest"
+        core::stop "${_name}"
     fi
 
     # has it stopped?
-    kill -0 ${_pid} >/dev/null 2>&1 && util:err_inline "failed to stop guest"
+    _pid=$(vm::getpid "${_name}")
+    [ -n "${_pid}" ] && kill -0 "${_pid}" 2>/dev/null && util::err_inline "failed to stop guest"
     echo "  * stage 2: guest powered off"
 
     # only needed if running or specifically doing a stage 2
@@ -177,10 +174,12 @@ migration::run(){
 migrate::__rename_config(){
     local _path
 
-    # we need the mount path first
-    _path=$(ssh "${_host}" mount | grep "^${_rdataset} " | cut -wf3)
+    # we need the mount path first.
+    # Linux/FreeBSD: ask zfs directly instead of parsing mount(8) output
+    # over ssh - same command either side, no format-parsing risk.
+    _path=$(ssh "${_host}" zfs list -H -o mountpoint "${_rdataset}" 2>/dev/null)
 
-    if [ $? -ne 0 -o -z "${_path}" ]; then
+    if [ -z "${_path}" ]; then
         echo "  ! failed to find remote datastore path. guest may not start"
         return 1
     fi
@@ -189,7 +188,7 @@ migrate::__rename_config(){
     ssh "${_host}" zfs mount "${_rdataset}/${_rname}" >/dev/null 2>&1
 
     echo "  * renaming configuration file to ${_rname}.conf"
-    ssh "${_host}" mv "${_path}/${_rname}/${_name}.conf" "${_path}/${_rname}/${_rname}.conf" >/dev/null 2>1
+    ssh "${_host}" mv "${_path}/${_rname}/${_name}.conf" "${_path}/${_rname}/${_rname}.conf" >/dev/null 2>/dev/null
 
     if [ $? -ne 0 ]; then
         echo "  ! failed to find rename remote configuration file. guest may not start"

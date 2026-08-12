@@ -1,6 +1,219 @@
 #!/bin/sh
 # SPDX-License-Identifier: BSD-2-Clause
 # SPDX-FileCopyrightText: 2016 Matt Churchyard <churchers@gmail.com>
+# SPDX-FileCopyrightText: 2026 Petr Derbyshev <drvpotr@gmail.com>
+
+# portable replacement for FreeBSD /bin/sh's built-in 'config::setvar()'.
+# Linux shells (dash, bash, ...) don't have it, so we emulate the
+# same "assign by variable name" behaviour with eval. Used all over
+# this file to write a value into a caller-supplied variable name.
+#
+# @param string _var name of the variable to set
+# @param string _val value to assign to it
+#
+config::setvar(){
+    local _var="$1"
+    local _value="$2"
+
+    # Escape characters which are special inside double quotes for eval.
+    _value=$(printf '%s' "${_value}" | sed \
+        -e 's/[\\]/\\&/g' \
+        -e 's/"/\\"/g' \
+        -e 's/\$/\\$/g' \
+        -e 's/`/\\`/g')
+
+    eval "${_var}=\"${_value}\""
+}
+
+# unset a value from guest configuration file
+#
+# @param string _name guest name
+# @param string _key config key to remove
+#
+config::unset(){
+    local _name="$1"
+    local _key="$2"
+
+    [ -z "${_name}" -o -z "${_key}" ] && return 1
+
+    config::file_remove \
+        "${VM_DS_PATH}/${_name}/${_name}.conf" \
+        "${_key}"
+}
+
+# LINUX CHANGE:
+# Set a key=value pair in a configuration file.
+#
+# This provides the small subset of sysrc functionality required by
+# vm-bhyve. Values are stored quoted, just like the original configs.
+#
+# @param string _file configuration file
+# @param string _key configuration key
+# @param string _value value to set
+#
+config::file_set(){
+    local _file="$1"
+    local _key="$2"
+    local _value="$3"
+    local _tmp
+    local _escaped
+
+    _tmp="${_file}.tmp"
+
+    # Escape characters which are special inside double quotes.
+    _escaped=$(printf '%s' "${_value}" | sed \
+        -e 's/[\\]/\\&/g' \
+        -e 's/"/\\"/g' \
+        -e 's/\$/\\$/g' \
+        -e 's/`/\\`/g')
+
+    awk -v key="${_key}" -v value="${_escaped}" '
+        BEGIN {
+            found = 0
+        }
+
+        $0 ~ "^[[:space:]]*" key "[[:space:]]*=" {
+            if (!found) {
+                print key "=\"" value "\""
+                found = 1
+            }
+            next
+        }
+
+        {
+            print
+        }
+
+        END {
+            if (!found)
+                print key "=\"" value "\""
+        }
+    ' "${_file}" > "${_tmp}" || {
+        rm -f "${_tmp}"
+        return 1
+    }
+
+    mv "${_tmp}" "${_file}"
+}
+
+# LINUX CHANGE:
+# Remove a key from a configuration file.
+#
+# Replaces:
+#   sysrc -inxqf <file> <key>
+#
+config::file_remove(){
+    local _file="$1"
+    local _key="$2"
+    local _tmp
+
+    _tmp="${_file}.tmp"
+
+    awk -v key="${_key}" '
+        $0 !~ "^[[:space:]]*" key "[[:space:]]*=" {
+            print
+        }
+    ' "${_file}" > "${_tmp}" || {
+        rm -f "${_tmp}"
+        return 1
+    }
+
+    mv "${_tmp}" "${_file}"
+}
+
+# LINUX CHANGE:
+# Append a value to a configuration variable.
+#
+# This replaces the sysrc:
+#   variable+=value
+#
+# Values are treated as whitespace-separated lists.
+#
+config::file_append(){
+    local _file="$1"
+    local _key="$2"
+    local _value="$3"
+    local _current
+
+    config::load_file_value "_current" "${_file}" "${_key}"
+
+    if [ -n "${_current}" ]; then
+        _current="${_current} ${_value}"
+    else
+        _current="${_value}"
+    fi
+
+    config::file_set "${_file}" "${_key}" "${_current}"
+}
+
+# LINUX CHANGE:
+# Remove a value from a whitespace-separated configuration variable.
+#
+# This replaces the sysrc:
+#   variable-=value
+#
+config::file_remove_value(){
+    local _file="$1"
+    local _key="$2"
+    local _value="$3"
+    local _current
+    local _new
+    local _item
+
+    config::load_file_value "_current" "${_file}" "${_key}"
+
+    _new=""
+
+    for _item in ${_current}; do
+        [ "${_item}" = "${_value}" ] && continue
+
+        if [ -n "${_new}" ]; then
+            _new="${_new} ${_item}"
+        else
+            _new="${_item}"
+        fi
+    done
+
+    config::file_set "${_file}" "${_key}" "${_new}"
+}
+
+# LINUX CHANGE:
+# Read one raw value from a configuration file.
+#
+# This is used internally by config::file_append() and
+# config::file_remove_value().
+#
+config::load_file_value(){
+    local _var="$1"
+    local _file="$2"
+    local _key="$3"
+    local _line
+    local _value
+
+    _line=$(grep "^[[:space:]]*${_key}[[:space:]]*=" "${_file}" 2>/dev/null | head -n 1)
+
+    if [ -n "${_line}" ]; then
+        _value="${_line#*=}"
+
+        # Remove surrounding whitespace.
+        _value=$(printf '%s' "${_value}" | sed \
+            -e 's/^[[:space:]]*//' \
+            -e 's/[[:space:]]*$//')
+
+        # Remove surrounding double quotes.
+        case "${_value}" in
+            \"*\")
+                _value="${_value#\"}"
+                _value="${_value%\"}"
+                ;;
+        esac
+    else
+        _value=""
+    fi
+
+    config::setvar "${_var}" "${_value}"
+}
+
 
 # load a configuration file
 # this reads the specfied file into the global VM_CONFIG variable.
@@ -33,17 +246,22 @@ config::get(){
     local _c_key="$2"
     local _c_def="$3"
     local _c_line
-    local IFS=$'\n'
+    local IFS='
+'
 
     for _c_line in ${VM_CONFIG}; do
         if [ "${_c_key}" = "${_c_line%%=*}" ]; then
-            setvar "${_c_var}" "${_c_line#*=}"
+            # LINUX CHANGE:
+            # replaced non-standard setvar
+            config::setvar "${_c_var}" "${_c_line#*=}"
             return 0
         fi
     done
 
     # not found
-    setvar "${_c_var}" "${_c_def}"
+    # LINUX CHANGE:
+    # replaced non-standard setvar
+    config::setvar "${_c_var}" "${_c_def}"
     return 1
 }
 
@@ -64,15 +282,12 @@ config::yesno(){
 }
 
 # set a value in guest configuration file
-# we check for newline at the end as sysrc won't add it
-# and that will mess up the new key and the existing one
-# from the end of the file
 #
 # @param string _name guest name
 # @param string _key config key to set
 # @param string _value value
 # @param int _skip_newline_check skip the check for newline
-# @return true if sysrc successful
+# @return true if successful
 #
 config::set(){
     local _name="$1"
@@ -86,7 +301,12 @@ config::set(){
         [ "${_newline}" -eq "0" ] && echo "" >> "${VM_DS_PATH}/${_name}/${_name}.conf"
     fi
 
-    sysrc -inqf "${VM_DS_PATH}/${_name}/${_name}.conf" "${_key}=${_value}" >/dev/null 2>&1
+    # LINUX CHANGE:
+    # replaced FreeBSD sysrc with our shell implementation
+    config::file_set \
+        "${VM_DS_PATH}/${_name}/${_name}.conf" \
+        "${_key}" \
+        "${_value}"
 }
 
 # remove a value from guest config
@@ -94,7 +314,11 @@ config::remove(){
     local _name="$1"
     local _key="$2"
 
-    sysrc -inxqf "${VM_DS_PATH}/${_name}/${_name}.conf" "${_key}" >/dev/null 2>&1
+    # LINUX CHANGE:
+    # replaced FreeBSD sysrc with our shell implementation
+    config::file_remove \
+        "${VM_DS_PATH}/${_name}/${_name}.conf" \
+        "${_key}"
 }
 
 # load core configuration file
@@ -127,17 +351,22 @@ config::core::get(){
     local _c_key="$2"
     local _c_def="$3"
     local _c_line
-    local IFS=$'\n'
+    local IFS='
+'
 
     for _c_line in ${VM_CORE_CONFIG}; do
         if [ "${_c_key}" = "${_c_line%%=*}" ]; then
-            setvar "${_c_var}" "${_c_line#*=}"
+            # LINUX CHANGE:
+            # replaced non-standard setvar
+            config::setvar "${_c_var}" "${_c_line#*=}"
             return 0
         fi
     done
 
     # not found
-    setvar "${_c_var}" "${_c_def}"
+    # LINUX CHANGE:
+    # replaced non-standard setvar
+    config::setvar "${_c_var}" "${_c_def}"
     return 1
 }
 
@@ -152,10 +381,18 @@ config::core::set(){
     local _value="$2"
     local _append="$3"
 
+    # LINUX CHANGE:
+    # replaced FreeBSD sysrc with our shell implementation
     if [ -n "${_append}" ]; then
-        sysrc -inqf "${vm_dir}/.config/system.conf" "${_var}"+="${_value}" >/dev/null 2>&1
+        config::file_append \
+            "${vm_dir}/.config/system.conf" \
+            "${_var}" \
+            "${_value}"
     else
-        sysrc -inqf "${vm_dir}/.config/system.conf" "${_var}"="${_value}" >/dev/null 2>&1
+        config::file_set \
+            "${vm_dir}/.config/system.conf" \
+            "${_var}" \
+            "${_value}"
     fi
 }
 
@@ -169,9 +406,16 @@ config::core::remove(){
     local _var="$1"
     local _value="$2"
 
+    # LINUX CHANGE:
+    # replaced FreeBSD sysrc with our shell implementation
     if [ -n "${_value}" ]; then
-        sysrc -inqf "${vm_dir}/.config/system.conf" "${_var}"-="${_value}" >/dev/null 2>&1
+        config::file_remove_value \
+            "${vm_dir}/.config/system.conf" \
+            "${_var}" \
+            "${_value}"
     else
-        sysrc -inxqf "${vm_dir}/.config/system.conf" ${_var} >/dev/null 2>&1
+        config::file_remove \
+            "${vm_dir}/.config/system.conf" \
+            "${_var}"
     fi
 }

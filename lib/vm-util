@@ -1,177 +1,163 @@
 #!/bin/sh
 # SPDX-License-Identifier: BSD-2-Clause
 # SPDX-FileCopyrightText: 2016 Matt Churchyard <churchers@gmail.com>
+# SPDX-FileCopyrightText: 2026 Petr Derbyshev <drvpotr@gmail.com>
 
 # make sure we have the right environment
 #
+# Linux/KVM modules are normally auto-loaded by the kernel/udev when
+# supported hardware is detected, and QEMU creates its own TAP interfaces
+# on demand - there's nothing to pre-load the way FreeBSD's 'kldload vmm'
+# requires. If /dev/kvm is still missing, make one best-effort attempt to
+# load the modules ourselves (util::load_vmm) before giving up.
+#
 util::setup(){
-    util::load_module "nmdm"
-    util::load_module "if_bridge"
-
-    # tap(4) & tun(4) were unified in r347241, this is closest ABI bump
-    if [ `uname -K` -ge 1300029 ]; then
-        util::load_module "if_tuntap"
-    else
-        util::load_module "if_tap"
-    fi
-
-    sysctl net.link.tap.up_on_open=1 >/dev/null 2>&1
-
-    # do we have the default template example, but no default in our .templates?
-    # if so, get a copy, this at least allows a simple "vm create" to work out of the box
-    if [ -e "/usr/local/share/examples/vm-bhyve/default.conf" -a ! -e "${vm_dir}/.templates/default.conf" ]; then
-        cp "/usr/local/share/examples/vm-bhyve/default.conf" "${vm_dir}/.templates/" >/dev/null 2>&1
+    if [ ! -e /dev/kvm ]; then
+        util::load_vmm
+        [ -e /dev/kvm ] || util::err "KVM is not available (/dev/kvm missing) - check virtualisation is enabled in firmware and the kvm kernel module is loaded"
     fi
 }
 
 # load a kernel module
 #
+# Linux: modprobe instead of kldload; lsmod instead of kldstat -qm
+#
 # @param string _mod the module name
 #
 util::load_module(){
     local _mod="$1"
-    kldstat -qm ${_mod} >/dev/null 2>&1
-    if [ $? -ne 0 ]; then
-        kldload ${_mod} >/dev/null 2>&1
-        [ $? -eq 0 ] || util::err "unable to load ${_mod}.ko!"
-    fi
+
+    lsmod | awk '{print $1}' | grep -qx "${_mod}" && return 0
+
+    modprobe "${_mod}" >/dev/null 2>&1
+    [ $? -eq 0 ] || util::err "unable to load ${_mod}"
 }
 
-# load vmm kernel module
+# load the kvm kernel module (and the vendor-specific one alongside it)
 #
-# `kldstat -n` calls kldstat(2), `kldstat -m` calls modstat(2).
-# the former checks if the module is loaded, the latter checks if
-# the module is initialized (ready to use).
+# Linux equivalent of loading FreeBSD's vmm.ko - loads the generic 'kvm'
+# module plus 'kvm_intel' or 'kvm_amd' depending on the host CPU, then
+# checks /dev/kvm actually showed up. Modules loading successfully but
+# /dev/kvm still not appearing usually means virtualisation extensions
+# aren't enabled in firmware (or, for a VM host, nested virt isn't on).
 #
 # @return 0: success
-#         1: failure
-#         2: not supported
+#         1: failure to load
+#         2: not supported (loaded, but /dev/kvm still missing)
+#
 util::load_vmm(){
-    # nothing to do if vmm module is already initialized
-    if kldstat -qm vmm; then
+    local _rc
+
+    [ -e /dev/kvm ] && return 0
+
+    modprobe kvm >/dev/null 2>&1
+    _rc=$?
+
+    case "$(awk -F: '/vendor_id/{print $2; exit}' /proc/cpuinfo 2>/dev/null)" in
+        *AuthenticAMD*) modprobe kvm_amd >/dev/null 2>&1 ;;
+        *GenuineIntel*) modprobe kvm_intel >/dev/null 2>&1 ;;
+    esac
+
+    if [ -e /dev/kvm ]; then
         return 0
-    fi
-
-    # if loaded but not initialized, it means not supported
-    if kldstat -qn vmm; then
-        return 2
-    fi
-
-    # if not loaded, try to load
-    if kldload -q vmm; then
-        if kldstat -qm vmm; then
-            return 0
-        else
-            # loaded but failed to initialize: not supported
-            return 2
-        fi
-    else
-        # failed to load
+    elif [ ${_rc} -ne 0 ]; then
         return 1
+    else
+        return 2
     fi
 }
 
-# check if system have bhyve support
+# check if system has QEMU/KVM support
 #
-# vmm module seems to be working if modstat(2) succeeds
-#
-# the vm_disable_host_checks="yes" rc settings allows bypassing all this
-# if your system should be supported but these checks break.
-#
-# @modifies VM_NO_UG
+# @return 0 if QEMU/KVM is available
 #
 util::check_bhyve_support(){
-    local _ret
+    # vm-bhyve-qemu requires root for most management operations
+    [ "$(id -u)" -ne 0 ] && \
+        util::err "virtual machines can only be managed as root"
 
-    # almost all our functionality requires access to things only root can do
-    [ `id -u` -ne 0 ] && util::err "virtual machines can only be managed by root"
-
-    # don't check if user wants to bypass host checks
+    # allow bypassing host checks
     util::yesno "$vm_disable_host_checks" && return 0
 
-    util::load_vmm
-    _ret=$?
-
-    case "${_ret}" in
-        0) ;; # success
-        1) util::err "unable to load vmm.ko!" ;;
-        2) util::err "virtualization is not supported or is disabled" ;;
-    esac
-
-    # check sysctls
-    # these only work for intel
-    # for AMD we give up trying to check for the time being
-    sysctl hw.model |grep Intel >/dev/null 2>&1
-
-    if [ $? -eq 0 ]; then
-        [ "`sysctl -n hw.vmm.vmx.initialized 2>/dev/null`" != "1" ] && util::err "kernel vmm not initialised (no VT-x / AMD SVM cpu support?)"
-        [ "`sysctl -n hw.vmm.vmx.cap.unrestricted_guest 2>/dev/null`" != "1" ] && VM_NO_UG="1"
+    # check that QEMU is installed
+    if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
+        util::err "qemu-system-x86_64 is not installed"
     fi
+
+    # check that KVM device exists
+    if [ ! -e /dev/kvm ]; then
+        util::err "KVM is not available: /dev/kvm does not exist"
+    fi
+
+    # check that KVM is accessible
+    if [ ! -r /dev/kvm ] || [ ! -w /dev/kvm ]; then
+        util::err "KVM is not accessible: check permissions on /dev/kvm"
+    fi
+
+    # check that the kernel exposes KVM
+    if [ ! -e /sys/module/kvm ]; then
+        util::err "KVM kernel module is not loaded"
+    fi
+
+    # check architecture
+    case "$(uname -m)" in
+        x86_64|amd64)
+            ;;
+        *)
+            util::err "unsupported host architecture: $(uname -m)"
+            ;;
+    esac
 }
 
 # check for passthru support
-# following neel@ wiki we search for DMAR acpi table for vt-d
-# and we check sysctl if amdvi is present and enabled
+#
+# Linux: an IOMMU (VT-d/AMD-Vi) being enabled and active shows up as
+# populated groups under /sys/kernel/iommu_groups - replaces FreeBSD's
+# acpidump DMAR-table check and the vmm.amdvi sysctl.
 #
 # @return success if host has vt-d or amdvi
 #
 util::check_bhyve_iommu(){
-    local _vtd
-    local _amdvi
-
-    # don't check if user wants to bypass host checks
-    # think this check is fairly solid but there's probably someone somewhere
-    # with iommu support that our tests fail for.
     util::yesno "$vm_disable_host_checks" && return 0
 
-    _vtd=$(acpidump -t |grep DMAR)
-    _amdvi=$(sysctl hw |grep 'vmm.amdvi.enable: 1')
-    [ -z "${_vtd}" -a -z "${_amdvi}" ] && return 1
+    [ -d /sys/kernel/iommu_groups ] && [ -n "$(ls -A /sys/kernel/iommu_groups 2>/dev/null)" ] && return 0
 
-    return 0
+    return 1
 }
 
-# check if bhyve support snapshot/suspend
+# check if suspend/resume is supported
 #
-# @return success if bhyve is built with snapshot/suspend support
+# Linux/QEMU: unlike bhyve (where snapshot/suspend support depends on how
+# the binary was built), QEMU's migrate-to-file mechanism - what
+# core::suspend and vm::run's -incoming handling both use - is a
+# standard, always-available feature of any reasonably current QEMU.
+# There's no equivalent "your build might not support this" case here.
+#
+# @return success - always, see above
 #
 util::check_bhyve_suspend(){
-    local _rc
-    local _suspend_enaled
-
-    # userland
-    bhyvectl 2>&1 | grep -q -- "--suspend="
-    _rc=$?
-    if [ $_rc -gt 0 ]; then
-        util::warn "bhyve on this host does not support suspend"
-        return $_rc
-    fi
-
-    # kernel
-    sysctl kern.conftxt | grep -q "BHYVE_SNAPSHOT"
-    _rc=$?
-    if [ $_rc -gt 0 ]; then
-        util::warn "bhyve on this host does not support suspend"
-        return $_rc
-    fi
-
-    config::core::get "_suspend_enabled" "suspend" "no"
-    if ! util::yesno "${_suspend_enabled}"; then
-        util::warn "bhyve seems to support suspend but disabled in vm-bhyve config"
-        return 1
-    fi
-
-    return $_rc
+    return 0
 }
 
 # restart a local service
 # checks if service is running and either starts or restarts
+#
+# Linux: prefer systemctl when available (works the same on every
+# systemd distro), falling back to the SysV-style 'service' wrapper
+# that's still commonly present for compatibility.
 #
 # @param string _serv the name of the service
 #
 util::restart_service(){
     local _serv="$1"
     local _cmd="restart"
+
+    if command -v systemctl >/dev/null 2>&1; then
+        systemctl is-active --quiet "${_serv}" || _cmd="start"
+        systemctl "${_cmd}" "${_serv}" >/dev/null 2>&1
+        [ $? -eq 0 ] || util::warn "failed to ${_cmd} service ${_serv}"
+        return
+    fi
 
     # see if it's actually running
     service ${_serv} status >/dev/null 2>&1
@@ -184,7 +170,7 @@ util::restart_service(){
 # show version
 #
 util::version(){
-    echo "vm-bhyve: Bhyve virtual machine management v${VERSION}"
+    echo "vm-bhyve: QEMU virtual machine management v${VERSION}"
 }
 
 # show version & usage information
@@ -283,6 +269,8 @@ util::warn(){
 # we move existing log and and create a new one.
 # one keep 1 previous file, as that should be enough
 #
+# Linux: GNU stat uses -c %s, not BSD's -f %z
+#
 # @param string _type whether to rotate guest or main log
 #
 util::log_rotate(){
@@ -301,7 +289,7 @@ util::log_rotate(){
     esac
 
     if [ -e "${_file}" ]; then
-        _size=$(stat -f %z "${_file}")
+        _size=$(stat -c %s "${_file}")
 
         if [ -n "${_size}" -a "${_size}" -ge 1048576 ]; then
             unlink "${_file}.0.gz" >/dev/null 2>&1
@@ -315,6 +303,9 @@ util::log_rotate(){
 # writes the date and a message to the specified log
 # the global log is in $vm_dir/vm-bhyve.log
 # guest logs are $vm_dir/{guest}/vm-bhyve.log
+#
+# 'date -Iseconds' is a GNU coreutils feature and works identically here -
+# nothing to change.
 #
 # @param string _type=guest|system log to global vm-bhyve log or guest
 # @param optional string _guest if _type=guest, the guest name, otherwise do not provide at all
@@ -434,7 +425,9 @@ util::valid_config_setting(){
 }
 
 # __getpid
-# get a process id
+# get a process id by pgrep pattern
+#
+# unchanged - pgrep -f behaves identically on Linux
 #
 # @param string _var variable to put pid into
 # @param string _proc process to look for
@@ -469,30 +462,25 @@ util::pad_spaces(){
 
 #
 # validate_cidr
-# validate the provided CIDR notation
-# if GNU ipcalc is available, perform stricter validation
-# otherwise, perform a simple check using regex
+# validate the provided CIDR notation using a format-only regex check
+#
+# Linux: dropped the GNU-ipcalc-if-available path from the original.
+# 'ipcalc' ships under the same command name with genuinely different,
+# incompatible CLIs across distros (GNU ipcalc, Red Hat's ipcalc,
+# ipcalc-ng, sipcalc, ...) with no reliable, portable way to tell which
+# one - and there's no Linux equivalent of FreeBSD's `pkg info` to check
+# for the GNU variant specifically. Always falls back to the same regex
+# the original used when GNU ipcalc wasn't found - format-only, won't
+# catch e.g. an out-of-range octet like 999.1.1.1/24.
 #
 # @param string IPv4 or IPv6 CIDR expression
 #
 util::validate_cidr(){
-    local _has_ipcalc
-
-    # perform stricter check if GNU ipcalc is available (optional)
-    which ipcalc >/dev/null && pkg info -q gnu-ipcalc
-    _has_ipcalc=$?
-
-    # ipcalc cannot check if IP address contains netmask (/prefix)
-    # so check it using case glob
     case "$1" in
         */[0-9]*)
-            if [ "$_has_ipcalc" -eq 0 ]; then
-                ipcalc -sc "$1"
-            else
-                echo "$1" | egrep -iqs \
-                    -e '^[0-9]{1,3}(\.[0-9]{1,3}){3}/[0-9]{1,2}$' \
-                    -e '^([0-9a-f]{0,4}:){1,7}[0-9a-f]{0,4}/[0-9]{1,3}$'
-            fi
+            echo "$1" | egrep -iqs \
+                -e '^[0-9]{1,3}(\.[0-9]{1,3}){3}/[0-9]{1,2}$' \
+                -e '^([0-9a-f]{0,4}:){1,7}[0-9a-f]{0,4}/[0-9]{1,3}$'
             ;;
         *) # no netmask
             return 1 ;;
