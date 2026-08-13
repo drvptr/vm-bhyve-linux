@@ -17,6 +17,9 @@ migration_run(){
     local _snap1 _snap2 _snap3 _destroy
     local _count=0
 
+    # reset OPTIND: it is global and persists between getopts loops
+    OPTIND=1
+
     while getopts cn12txr:d:i: _opt; do
         case $_opt in
             c) _config="1" ;;

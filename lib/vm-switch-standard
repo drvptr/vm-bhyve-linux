@@ -27,21 +27,12 @@
 
 switch_standard_init(){
     local _name="$1"
-    local _id _addr _mtu _len
+    local _id _addr _mtu _mac
 
     # see if it already exists
     switch_standard_id "_id" "${_name}" && return 0
 
-    # Linux interface names are normally limited to 15 characters.
-    # Keep the vm- prefix where possible, otherwise use the switch name
-    # directly.  The logical switch name remains stored separately.
-    _len=$(printf '%s' "${_name}" | wc -m | tr -d ' ')
-
-    if [ $((_len + 3)) -le 15 ]; then
-        _id="vm-${_name}"
-    else
-        _id="vm-$(printf '%s' "${_name}" | cut -c1-12)"
-    fi
+    switch___bridge_name "_id" "${_name}"
 
     # Avoid collisions caused by truncation.
     if ip link show dev "${_id}" >/dev/null 2>&1; then

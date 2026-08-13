@@ -97,28 +97,35 @@ config_file_set(){
 }
 
 # LINUX CHANGE:
-# Remove a key from a configuration file.
+# Remove one or more keys from a configuration file.
 #
 # Replaces:
-#   sysrc -inxqf <file> <key>
+#   sysrc -inxqf <file> <key> [key ...]
+#
+# sysrc accepts several key names in a single call and callers rely on
+# that - switch_remove() passes four keys at once. Treating the whole
+# string as one key name matched nothing and left stale switch settings
+# behind in system.conf, so split on whitespace here.
 #
 config_file_remove(){
     local _file="$1"
-    local _key="$2"
-    local _tmp
+    local _keys="$2"
+    local _key _tmp
 
     _tmp="${_file}.tmp"
 
-    awk -v key="${_key}" '
-        $0 !~ "^[[:space:]]*" key "[[:space:]]*=" {
-            print
+    for _key in ${_keys}; do
+        awk -v key="${_key}" '
+            $0 !~ "^[[:space:]]*" key "[[:space:]]*=" {
+                print
+            }
+        ' "${_file}" > "${_tmp}" || {
+            rm -f "${_tmp}"
+            return 1
         }
-    ' "${_file}" > "${_tmp}" || {
-        rm -f "${_tmp}"
-        return 1
-    }
 
-    mv "${_tmp}" "${_file}"
+        mv "${_tmp}" "${_file}" || return 1
+    done
 }
 
 # LINUX CHANGE:

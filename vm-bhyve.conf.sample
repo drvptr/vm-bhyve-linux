@@ -1,0 +1,44 @@
+# vm-bhyve-qemu configuration
+#
+# Installed to /etc/vm-bhyve.conf. This replaces the vm_* entries that
+# the FreeBSD original reads from /etc/rc.conf - vm-base looks for this
+# file (and /etc/default/vm-bhyve, /usr/local/etc/vm-bhyve.conf) at
+# startup. Anything already set in the environment wins over this file.
+
+# vm_dir (required)
+# Where guests, templates, ISOs and images live. Either a plain
+# directory, or "zfs:pool/dataset" to enable the ZFS features
+# (zvol disks, snapshot, clone, image, migrate).
+#
+#vm_dir="/var/lib/vm-bhyve"
+#vm_dir="zfs:tank/vm"
+
+# vm_list
+# Guests to start on boot, in order, when 'vm startall' runs
+# (vm.service). 'vm stopall' shuts them down in reverse order.
+#
+#vm_list="web1 db1"
+
+# vm_delay
+# Seconds to wait between guests during startall/stopall.
+#
+#vm_delay="5"
+
+# vm_stop_timeout
+# How long to wait for a guest to shut down after an ACPI powerdown
+# before escalating to SIGTERM and then SIGKILL.
+#
+#vm_stop_timeout="90"
+
+# vm_ovmf_dir
+# Directory holding OVMF_CODE.fd / OVMF_VARS.fd for UEFI guests. Only
+# needed if your distribution puts them somewhere unusual; the known
+# Debian/Ubuntu, Fedora/RHEL and Arch paths are searched by default.
+#
+#vm_ovmf_dir="/usr/share/OVMF"
+
+# vm_disable_host_checks
+# Skip the qemu/KVM host checks at startup. Useful for inspecting a
+# datastore on a machine that can't actually run guests.
+#
+#vm_disable_host_checks="no"

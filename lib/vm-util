@@ -442,12 +442,22 @@ util_getpid(){
     setvar "${_var}" "${_ret}"
 }
 
+# split a whitespace-separated string and return the Nth field
+#
+# 'cut -w' is a FreeBSD extension; GNU coreutils cut rejects it outright,
+# which silently blanked the %CPU/RSZ/UPTIME columns of 'vm list -v'.
+# awk's default field splitting does exactly what -w did.
+#
+# @param string _var variable to put the field into
+# @param string _data the string to split
+# @param int _num 1-based field number
+#
 util_get_part(){
     local _var="$1"
     local _data="$2"
     local _num="$3"
 
-    setvar "${_var}" $(echo "${_data}" |cut -w -f${_num})
+    setvar "${_var}" "$(printf '%s\n' "${_data}" | awk -v n="${_num}" '{print $n}')"
 }
 
 #

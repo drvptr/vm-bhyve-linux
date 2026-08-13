@@ -54,7 +54,7 @@ install-config:
 	@if [ -e "$(CONFDIR)/vm-bhyve.conf" ]; then \
 		echo "$(CONFDIR)/vm-bhyve.conf exists, leaving it alone"; \
 	else \
-		$(INSTALL) -m 644 vm-bhyve.conf.sample $(CONFDIR)/vm-bhyve.conf; \
+		$(INSTALL) -m 644 vm-bhyve.conf.sample $(CONFDIR)/vm-bhyve.conf && \
 		echo "installed $(CONFDIR)/vm-bhyve.conf - set vm_dir in it"; \
 	fi
 

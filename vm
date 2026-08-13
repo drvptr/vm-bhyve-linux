@@ -39,7 +39,6 @@ fi
 . "${LIB}/vm-config"
 . "${LIB}/vm-core"
 . "${LIB}/vm-datastore"
-. "${LIB}/vm-guest"
 . "${LIB}/vm-help"
 . "${LIB}/vm-info"
 . "${LIB}/vm-migration"

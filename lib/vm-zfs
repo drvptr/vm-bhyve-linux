@@ -213,6 +213,9 @@ zfs_remove_snapshot(){
 zfs_rollback(){
     local _name _snap _opt _force _fs _snap_exists
 
+    # reset OPTIND: it is global and persists between getopts loops
+    OPTIND=1
+
     while getopts r _opt; do
         case $_opt in
             r) _force="-r" ;;
@@ -368,6 +371,9 @@ zfs_image_create(){
     local _uuid _snap _date _no_compress _filename
     local _compress _decompress
 
+    # reset OPTIND: it is global and persists between getopts loops
+    OPTIND=1
+
     while getopts d:u _opt ; do
         case $_opt in
             d) _desc=${OPTARG} ;;
@@ -445,6 +451,10 @@ zfs_image_create(){
 zfs_image_provision(){
     local _uuid _name _file _oldname _entry _num=0 _type
     local _datastore="default" _decompress
+    local _opt
+
+    # reset OPTIND: it is global and persists between getopts loops
+    OPTIND=1
 
     while getopts d: _opt ; do
         case $_opt in

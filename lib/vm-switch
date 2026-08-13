@@ -88,6 +88,9 @@ switch_create(){
     local _list _curr _vlan _if _bridge _addr _mtu _priv
 
     # process options
+    # reset OPTIND: it is global and persists between getopts loops
+    OPTIND=1
+
     while getopts t:i:n:b:a:m:p _opt; do
         case ${_opt} in
             t) _type="${OPTARG}" ;;
@@ -124,7 +127,7 @@ switch_create(){
     # check address
     if [ -n "${_addr}" ]; then
         util_validate_cidr "${_addr}"
-        [ $? -eq 0 ] || util_err "address must be supplied in CIDR notation (e.g. 192.0.2.1/24, 3fff_1/64)"
+        [ $? -eq 0 ] || util_err "address must be supplied in CIDR notation (e.g. 192.0.2.1/24, 3fff::1/64)"
     fi
 
     # check mtu
@@ -331,7 +334,7 @@ switch_address(){
     # check address
     if [ -n "${_addr}" ] && [ "${_addr}" != "none" ]; then
         util_validate_cidr "${_addr}"
-        [ $? -eq 0 ] || util_err "address must be supplied in cidr notation (e.g. 192.0.2.1/24, 3fff_1/64)"
+        [ $? -eq 0 ] || util_err "address must be supplied in cidr notation (e.g. 192.0.2.1/24, 3fff::1/64)"
     fi
 
     case "${_type}" in
@@ -408,6 +411,27 @@ switch_id(){
 #
 switch___viid(){
     setvar "$1" "vm-switch/${2}"
+}
+
+# work out the bridge interface name to use for a switch.
+#
+# Linux caps interface names at IFNAMSIZ-1 (15 chars), so long switch
+# names get truncated. Shared by the standard and vxlan switch types so
+# they can't drift apart.
+#
+# @param string _var variable to put the name into
+# @param string _switch switch name
+#
+switch___bridge_name(){
+    local _len
+
+    _len=$(printf '%s' "$2" | wc -m | tr -d ' ')
+
+    if [ $((_len + 3)) -le 15 ]; then
+        setvar "$1" "vm-$2"
+    else
+        setvar "$1" "vm-$(printf '%s' "$2" | cut -c1-12)"
+    fi
 }
 
 # retrieve interface name, given a switch name

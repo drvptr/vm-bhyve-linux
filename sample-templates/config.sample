@@ -103,8 +103,15 @@ hostbridge=""
 #
 ignore_bad_msr="no"
 
+# qemu_options
+# any additional qemu command line options, appended verbatim
+#
+qemu_options="-device intel-iommu"
+
 # bhyve_options
-# any additional bhyve command line options
+# LINUX/QEMU: ignored. This is bhyve command line syntax and would be
+# meaningless to qemu, so it is logged as a warning and dropped rather
+# than passed through. Use qemu_options above instead.
 #
 bhyve_options="-p 1:1"
 
@@ -380,10 +387,15 @@ graphics_res="800x600"
 graphics_wait="auto"
 
 # graphics_vga
-# valid options for this are on/off/io. io is the default
-# please see the bhyve man page for details on this option
+# LINUX/QEMU: this is the name of the qemu VGA device to attach, not
+# bhyve's on/off/io tristate. The old on/off/io values are still
+# accepted (and mapped to the standard adapter) so configs migrated
+# from FreeBSD keep working.
 #
-graphics_vga="io"
+# Default: VGA
+# Valid Options: VGA,virtio-vga,qxl-vga,bochs-display
+#
+graphics_vga="VGA"
 
 # vnc_password
 # Password to connect the graphical console of the guest.

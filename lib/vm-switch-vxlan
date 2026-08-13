@@ -1,6 +1,28 @@
 #!/bin/sh
 # SPDX-License-Identifier: BSD-2-Clause
 # SPDX-FileCopyrightText: 2016 Matt Churchyard <churchers@gmail.com>
+# SPDX-FileCopyrightText: 2026 Petr Derbyshev <drvpotr@gmail.com>
+#
+# Linux port of vm-bhyve's vxlan switch implementation.
+#
+# This file was still pure FreeBSD: it drove ifconfig(8) with vxlanid/
+# vxlanlocal/vxlangroup/vxlandev/descr/group, route(8) with -iface, and
+# md5(1) - none of which exist on Linux. Every vxlan operation therefore
+# failed, even though vm-switch advertises vxlan as a supported type.
+#
+# The Linux equivalents used here:
+#   ifconfig vxlanN create vxlanid.. -> ip link add .. type vxlan id ..
+#   ifconfig bridge create           -> ip link add .. type bridge
+#   ifconfig brX addm vxlanN         -> ip link set vxlanN master brX
+#   route add -net M/32 -iface if    -> ip route add M/32 dev if
+#   md5 -qs                          -> md5sum
+#
+# VXLAN also needs a destination UDP port. FreeBSD defaults to 4789 (the
+# IANA-assigned port); the Linux kernel defaults to the older 8472 for
+# historical reasons, so 4789 is requested explicitly to stay
+# interoperable with FreeBSD hosts on the same segment.
+
+VM_VXLAN_PORT="4789"
 
 # create a vxlan switch
 # we create a bridge and then add the vxlan interface to it
@@ -9,7 +31,7 @@
 #
 switch_vxlan_init(){
     local _name="$1"
-    local _id _vlan _if _maddr _addr _ifconf
+    local _id _vlan _if _maddr _addr _local _mac _vxdev
 
     # see if the bridge already exists
     switch_standard_id "_id" "${_name}" && return 0
@@ -20,45 +42,59 @@ switch_vxlan_init(){
     [ -z "${_vlan}" -o -z "${_if}" ] && return 1
 
     # get local address for this interface
-    _local=$(ifconfig ${_if} | grep "inet " | cut -d" " -f 2)
-    [ -z "${_local}" ] && return 1
+    _local=$(ip -4 -o addr show dev "${_if}" 2>/dev/null | \
+        awk '{print $4}' | cut -d/ -f1 | head -n 1)
+    [ -z "${_local}" ] && \
+        util_err "unable to find an IPv4 address on ${_if} for vxlan switch ${_name}"
 
     # come up with an ip address for multicast data
     switch_vxlan___multicast "_maddr" "${_name}"
 
     # create the vxlan interface
-    ifconfig "vxlan${_vlan}" create vxlanid "${_vlan}" vxlanlocal "${_local}" vxlangroup "${_maddr}" \
-      vxlandev "${_if}" descr "vm-vxlan/${_switch}" group vm-vlan up >/dev/null 2>&1
-    [ $? -eq 0 ] || return 1
+    _vxdev="vxlan${_vlan}"
 
-    # get the length of the switch name
-    # it's useful for other utilities to use switch name as interface name
-    # as it's static. can't do that if it's > 12 chars
-    _len=$(echo -n "${_name}" | wc -m)
+    if ! ip link show dev "${_vxdev}" >/dev/null 2>&1; then
+        ip link add name "${_vxdev}" type vxlan id "${_vlan}" \
+            group "${_maddr}" local "${_local}" dev "${_if}" \
+            dstport "${VM_VXLAN_PORT}" >/dev/null 2>&1
+        [ $? -eq 0 ] || util_err "failed to create vxlan interface ${_vxdev} for switch ${_name}"
 
-    if [ ${_len} -le 12 ]; then
-      _ifconf="name vm-${_name}"
-    else
-      _ifconf="descr vm/${_name}"
+        ip link set dev "${_vxdev}" up >/dev/null 2>&1
     fi
 
     # create a bridge for this switch
-    _id=$(ifconfig bridge create ${_ifconf} group vm-switch up 2>/dev/null)
+    switch___bridge_name "_id" "${_name}"
+
+    if ip link show dev "${_id}" >/dev/null 2>&1; then
+        util_err "failed to create bridge interface for switch ${_name}: ${_id} already exists"
+    fi
+
+    ip link add name "${_id}" type bridge >/dev/null 2>&1
     [ $? -eq 0 ] || util_err "failed to create bridge interface for switch ${_name}"
 
+    ip link set dev "${_id}" up >/dev/null 2>&1
     switch_set_viid "${_name}" "${_id}"
 
-    # randomise mac
-    ifconfig "${_id}" link random
+    # randomise mac (locally-administered unicast; see switch_standard_init)
+    _mac=$(
+        set -- $(od -An -N6 -tx1 /dev/urandom 2>/dev/null)
+        [ $# -ge 6 ] && printf "%02x:%s:%s:%s:%s:%s" \
+            $(( (0x$1 & 0xfe) | 0x02 )) "$2" "$3" "$4" "$5" "$6"
+    )
+    [ -n "${_mac}" ] && \
+        ip link set dev "${_id}" address "${_mac}" >/dev/null 2>&1
 
-    # bridge vxlan to our guest switch
-    # static route traffic for this multicast address via our specified interface
-    ifconfig "${_id}" addm "vxlan${_vlan}"
-    route add -net ${_maddr}/32 -iface ${_if} >/dev/null 2>&1
+    # bridge vxlan to our guest switch, and make sure traffic for the
+    # multicast group leaves via the interface the user selected
+    ip link set dev "${_vxdev}" master "${_id}" >/dev/null 2>&1
+    ip route add "${_maddr}/32" dev "${_if}" >/dev/null 2>&1
 
     # custom address for bridge?
     config_core_get "_addr" "addr_${_name}"
-    [ -n "${_addr}" ] && ifconfig "${_id}" inet ${_addr}
+    [ -n "${_addr}" ] && \
+        ip addr add "${_addr}" dev "${_id}" >/dev/null 2>&1
+
+    return 0
 }
 
 # show the configuration details for a vxlan switch
@@ -77,7 +113,7 @@ switch_vxlan_show(){
     config_core_get "_addr" "addr_${_name}"
     config_core_get "_priv" "private_${_name}" "no"
 
-    printf "${_format}" "${_name}" "vxlan" "${_id:--}" "${_addr:--}" "${_priv}" "n/a" "${_vlan}" "${_port}"
+    printf "${_format}" "${_name}" "vxlan" "${_id:--}" "${_addr:--}" "${_priv}" "n/a" "${_vlan:--}" "${_port:--}"
 }
 
 # create a vxlan switch
@@ -106,7 +142,7 @@ switch_vxlan_create(){
 #
 switch_vxlan_remove(){
     local _switch="$1"
-    local _id _vlan _maddr
+    local _id _vlan _maddr _if
 
     # try to get guest bridge and vxlan id
     switch_standard_id "_id" "${_switch}"
@@ -115,17 +151,21 @@ switch_vxlan_remove(){
     config_core_get "_vlan" "vlan_${_switch}"
     [ -z "${_vlan}" ] && return 1
 
+    config_core_get "_if" "ports_${_switch}"
+
     # get the multicast address we used for this switch
     # and try to remove any route we may have added
     switch_vxlan___multicast "_maddr" "${_switch}"
-    route del -net "${_maddr}/32" >/dev/null 2>&1
+    ip route del "${_maddr}/32" dev "${_if}" >/dev/null 2>&1
 
     # destroy the guest bridge
-    ifconfig ${_id} destroy >/dev/null 2>&1
+    ip link set dev "${_id}" down >/dev/null 2>&1
+    ip link delete dev "${_id}" type bridge >/dev/null 2>&1
     [ $? -eq 0 ] || return 1
 
     # destroy the vxlan
-    ifconfig "vxlan${_vlan}" destroy >/dev/null 2>&1
+    ip link set dev "vxlan${_vlan}" down >/dev/null 2>&1
+    ip link delete dev "vxlan${_vlan}" type vxlan >/dev/null 2>&1
 }
 
 # add a new interface to this switch
@@ -161,6 +201,11 @@ switch_vxlan_vlan(){
 
 # get the multicast address for a vxlan switch
 #
+# Linux: md5(1) is a FreeBSD base utility; the coreutils equivalent is
+# md5sum, which reads stdin and appends a filename field. The resulting
+# 239.x.y.z address is the same either way, so FreeBSD and Linux hosts
+# sharing a switch name still land on the same group.
+#
 # @param string _var variable to put address into
 # @param string _switch the switch name
 #
@@ -170,11 +215,11 @@ switch_vxlan___multicast(){
     local _hash _l_addr _octet _pos
 
     # come up with an ip address for multicast data
-    _hash=$(md5 -qs "${_switch}")
+    _hash=$(printf '%s' "${_switch}" | md5sum | awk '{print $1}')
     _l_addr="239"
 
     for _pos in 1-2 3-4 5-6; do
-        _octet=$(printf ".%d" "0x`echo "${_hash}"| cut -c ${_pos}`")
+        _octet=$(printf ".%d" "0x$(echo "${_hash}" | cut -c ${_pos})")
         _l_addr="${_l_addr}${_octet}"
     done
 

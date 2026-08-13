@@ -62,6 +62,7 @@ vm_run(){
     local _opts _devices _taplist _exit _passdev
     local _comports _comstring _logpath="/dev/null" _run=1
     local _qemu_options _bhyve_options _action _boot_opt _accel _pid _tap _seedcmd
+    local _incoming
 
     cmd_parse_args "$@"
     shift $?
@@ -111,8 +112,11 @@ vm_run(){
 
     # generate a uuid if we don't have one already
     if [ -z "${_uuid}" ]; then
-        _uuid=$(uuidgen)
-        config_set "${_name}" "uuid" "${_uuid}"
+        # uuidgen comes from util-linux and isn't installed everywhere;
+        # the kernel always provides one (same fallback as core_create)
+        _uuid=$(uuidgen 2>/dev/null)
+        [ -z "${_uuid}" ] && _uuid=$(cat /proc/sys/kernel/random/uuid 2>/dev/null)
+        [ -n "${_uuid}" ] && config_set "${_name}" "uuid" "${_uuid}"
     fi
 
     # get cpu topology
@@ -229,10 +233,14 @@ vm_run(){
         # from this line onward, no more changes in _opts
         #
 
-        # resume if saved vm state found
+        # resume if saved vm state found.
+        # keep this out of _opts: we are inside the restart loop, and
+        # appending it there would hand qemu two -incoming arguments on
+        # the second pass.
+        _incoming=""
         if vm_has_saved_state "${_name}"; then
             util_log "guest" "${_name}" "saved vm state found, resuming"
-            _opts="${_opts} -incoming file:${VM_DS_PATH}/${_name}/${_name}.save"
+            _incoming="-incoming file:${VM_DS_PATH}/${_name}/${_name}.save"
         fi
 
         util_log "guest" "${_name}" " [qemu options: ${_opts}]" \
@@ -253,6 +261,7 @@ vm_run(){
             -monitor none \
             ${_boot_opt} \
             ${_opts} \
+            ${_incoming} \
             ${_devices} \
             ${_iso_dev} \
             ${_comstring} \
@@ -598,7 +607,15 @@ vm_qemu_device_fbuf(){
         _devices="${_devices} -vnc ${_listen:-0.0.0.0}:${_display}"
     fi
 
-    _devices="${_devices} -device ${_vga:-VGA}"
+    # bhyve's graphics_vga takes on/off/io - none of which are qemu
+    # device names. Accept those for configs migrated from FreeBSD and
+    # map them onto the standard adapter instead of handing qemu
+    # '-device io', which it refuses to start with.
+    case "${_vga}" in
+        ""|on|off|io) _vga="VGA" ;;
+    esac
+
+    _devices="${_devices} -device ${_vga}"
 
     [ -n "${_res}" ] && \
         util_log "guest" "${_name}" "warning; graphics_res has no qemu equivalent - set the resolution from inside the guest"
@@ -843,6 +860,28 @@ vm_confirm_stopped(){
     return 0
 }
 
+# make sure a virtual machine IS running.
+#
+# This is the counterpart of vm_confirm_stopped and is what
+# core_reset/core_poweroff/core_suspend call. It was missing entirely,
+# so those three commands hit "vm_confirm_running: command not found",
+# took the failure branch and refused to work on any guest at all.
+#
+# @param string _name the guest name
+# @return success if the guest is running locally
+#
+vm_confirm_running(){
+    local _name="$1"
+    local _pid
+
+    datastore_get_guest "${_name}" || return 1
+
+    _pid=$(vm_getpid "${_name}")
+    [ -n "${_pid}" ] || return 1
+
+    kill -0 "${_pid}" 2>/dev/null
+}
+
 #
 # check if the virtual machine has saved state
 #
@@ -869,7 +908,9 @@ vm_generate_static_mac(){
     local _dev_id=""
 
     while [ -z "${_dev_id}" -o "${_dev_id}" = "00:00:00" ]; do
-          _dev_id=$(openssl rand -hex 3 | sed 's/../&:/g; s/^./0/; s/:$//')
+          # 52:54:00 is already a valid unicast OUI, so there is no bit to
+          # clear here - the old 's/^./0/' just threw away 4 bits of entropy
+          _dev_id=$(openssl rand -hex 3 | sed 's/../&:/g; s/:$//')
     done
 
     _mac="52:54:00:${_dev_id}"

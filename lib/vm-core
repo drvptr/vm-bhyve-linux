@@ -56,6 +56,9 @@ core_list(){
     local _state _pcpu _rss _uptime _tags _filter_tag
     local _format="%s^%s^%s^%s^%s^%s^%s^%s^%s\n"
 
+    # reset OPTIND: it is global and persists between getopts loops
+    OPTIND=1
+
     while getopts rvt: _opt ; do
         case ${_opt} in
             r) _running_only='true' ;;
@@ -175,6 +178,9 @@ core_create(){
     local _zfs_opts _disk_size _template="default" _ds="default" _ds_path _img _cpu _memory _uuid
     local _enable_cloud_init _cloud_init_dir _ssh_public_keys _ssh_public_key _ssh_key_file _network_config _mac
     local _user_data_file
+
+    # reset OPTIND: it is global and persists between getopts loops
+    OPTIND=1
 
     while getopts d:t:s:i:c:m:Ck:n:u: _opt ; do
         case $_opt in
@@ -399,7 +405,7 @@ core_parse_netconfig(){
 # @private
 #
 core_compile_network_config(){
-    local _addr _ipv4_found ipv6_found
+    local _addr _ipv4_found _ipv6_found
     local _tmpfile=$(mktemp)
 
     cat << EOF >> "${_tmpfile}"
@@ -443,15 +449,15 @@ EOF
     fi
 
     # nameservers & searchdomains
-    if [ -n "${_network_config_serachdomains}" -o -n "${_network_config_nameservers}" ]; then
+    if [ -n "${_network_config_searchdomains}" -o -n "${_network_config_nameservers}" ]; then
         echo "    nameservers:" >> ${_tmpfile}
 
         if [ -n "${_network_config_nameservers}" ]; then
             echo "      addresses: [${_network_config_nameservers}]" >> ${_tmpfile}
         fi
 
-        if [ -n "${_searchdomains}" ]; then
-            echo "      search: [${_searchdomains}]" >> ${_tmpfile}
+        if [ -n "${_network_config_searchdomains}" ]; then
+            echo "      search: [${_network_config_searchdomains}]" >> ${_tmpfile}
         fi
     fi
 
@@ -465,7 +471,7 @@ EOF
         fi
 
         if [ -n "${_network_config_gateway6}" ]; then
-            echo "      - to: _/0" >> ${_tmpfile}
+            echo "      - to: ::/0" >> ${_tmpfile}
             echo "        via: ${_network_config_gateway6}" >> ${_tmpfile}
         fi
     fi
@@ -529,6 +535,9 @@ core_write_img(){
 #
 core_add(){
     local _name _device _type _sopt _opt
+
+    # reset OPTIND: it is global and persists between getopts loops
+    OPTIND=1
 
     while getopts d:t:s: _opt; do
         case $_opt in
@@ -1009,7 +1018,16 @@ core_stop(){
     [ -z "${_name}" ] && help_show "stop"
 
     while [ -n "${_name}" ]; do
-        core___stop_one "${_name}"
+        # VM_DS_PATH is global and still points at whatever was looked up
+        # last. Without this, stopping a guest that lives on a non-default
+        # datastore looks for its pid file in the wrong place and reports
+        # the guest as not running.
+        if datastore_get_guest "${_name}"; then
+            core___stop_one "${_name}"
+        else
+            util_warn "${_name} doesn't appear to be a valid virtual machine"
+        fi
+
         shift
         _name="$1"
     done
@@ -1026,6 +1044,11 @@ core_stop(){
 core___stop_one(){
     local _name="$1"
     local _pid
+
+    datastore_get_guest "${_name}" || {
+        util_warn "${_name} doesn't appear to be a valid virtual machine"
+        return 1
+    }
 
     _pid=$(vm_getpid "${_name}")
 
@@ -1195,7 +1218,6 @@ core_discard(){
 core_rename(){
     local _old="$1"
     local _new="$2"
-    local _mv_failed
 
     [ -z "${_old}" -o -z "${_new}" ] && help_show "rename"
     util_check_name "${_new}" || util_err "invalid virtual machine name - '${_name}'"
@@ -1220,15 +1242,19 @@ core_rename(){
     [ $? -eq 0 ] || util_err "changed guest directory but failed to rename configuration file"
 
     # rename saved vm state file
-    _mv_failed=0
+    #
+    # 'find -depth 1' is a BSD primary; GNU find spells it '-maxdepth 1'
+    # and errors out on the BSD form. The mv was also only being echoed,
+    # so the state file kept the old guest's name and 'vm start' could
+    # never find it again.
     (
         cd "${VM_DS_PATH}/${_new}" || exit 1
-        find . -type f -depth 1 -name "${_old}.save*" | while read -r oldf; do
-            newf="$(echo "${oldf}" | sed "s|${_old}|${_new}|" )"
-            echo mv "${oldf} ${newf}" || _mv_failed=1
+        find . -maxdepth 1 -type f -name "${_old}.save*" | while read -r oldf; do
+            newf="$(echo "${oldf}" | sed "s|${_old}|${_new}|")"
+            mv "${oldf}" "${newf}" || exit 1
         done
     )
-    [ "${_mv_failed}" -eq 0 ] || util_err "changed guest directory but failed to rename saved vm state file"
+    [ $? -eq 0 ] || util_err "changed guest directory but failed to rename saved vm state file"
 }
 
 # 'vm console'
@@ -1244,6 +1270,9 @@ core_rename(){
 core_console(){
     local _name _port
     local _console _tmux _tmux_cmd _wait_for_vm _pid
+
+    # reset OPTIND: it is global and persists between getopts loops
+    OPTIND=1
 
     while getopts w _opt ; do
         case $_opt in
@@ -1349,6 +1378,9 @@ core_iso(){
     local _url _ds="default" _filename
     local _fetch_opts
 
+    # reset OPTIND: it is global and persists between getopts loops
+    OPTIND=1
+
     while getopts 46d:u _opt ; do
         case $_opt in
             4) _fetch_opts="${_fetch_opts} -4" ;;
@@ -1416,8 +1448,11 @@ core_img(){
     local _url _ds="default" _filename
     local _fetch_opts
     if ! which qemu-img > /dev/null; then
-        util_err "Error: qemu-img is required to work with cloud images! Run 'pkg install qemu-tools'."
+        util_err "qemu-img is required to work with cloud images - install the qemu-utils/qemu-img package"
     fi
+
+    # reset OPTIND: it is global and persists between getopts loops
+    OPTIND=1
 
     while getopts 46d:u _opt ; do
         case $_opt in

@@ -17,6 +17,9 @@ CMD_VALID_LIST="${CMD_VALID_LIST},suspend,suspendall,discard,help,tags"
 cmd_parse_info(){
     local _cmd
 
+    # no arguments at all: fall through to cmd_parse, which prints usage
+    [ -z "$1" ] && return 0
+
     cmd_find "_cmd" "$1" "${CMD_VALID_LIST}"
 
     # "vm <subcommand> -h" command also displays help about any subcommand
@@ -203,6 +206,12 @@ cmd_parse_image(){
 cmd_parse_args(){
     local _opt _count
 
+    # getopts never resets OPTIND by itself. Without this, any function
+    # that runs getopts earlier in the same process (core_create,
+    # core_iso, migration_run, ...) leaves OPTIND pointing past the end
+    # of our argument list and "shift $?" below eats the real arguments.
+    OPTIND=1
+
     while getopts fitv _opt; do
         case ${_opt} in
             f) VM_OPT_FORCE="1"
@@ -235,7 +244,7 @@ cmd_find(){
     local _opt _choice _found=""
     local IFS=","
 
-    [ -n "${_user_cmd}" ] || util_err "no command specified"
+    [ -n "${_user_cmd}" ] || return 1
 
     for _opt in ${_valid}; do
         # exact match?
